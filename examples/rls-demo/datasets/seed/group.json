@@ -1,0 +1,10 @@
+{
+  "euuid" : "e5555555-5555-5555-5555-555555555555",
+  "name" : "Engineering",
+  "active" : true,
+  "users" : [ {
+    "euuid" : "c3333333-3333-3333-3333-333333333333",
+    "xid" : "R73HfAB1cwcjethbRUYCCa"
+  } ],
+  "xid" : "VKWJzC6RVv5GZnqxewreFE"
+}

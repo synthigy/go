@@ -1,0 +1,3 @@
+# Build artifact — regenerated from ../synthigy/{schema.json,ops.ir.json} via
+# `go generate ./...`. Commit the contract snapshots, not this.
+generated.go

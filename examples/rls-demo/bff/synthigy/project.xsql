@@ -1,0 +1,31 @@
+@workspace "RLS Project Demo"
+
+@search list
+project (limit ?limit:int=7)
+  xid
+  name
+  active
+  description
+
+@search list
+project_task
+  xid
+  title
+  status
+  priority
+  ->assignee
+    xid
+    name
+  ->project
+    xid
+    name
+
+@sql-template taskCount
+@namespace Project
+@returns n:int
+SELECT count(*) AS n FROM {project_task}
+
+@sql-template projectCount
+@namespace Project
+@returns n:int
+SELECT count(*) AS n FROM {project}

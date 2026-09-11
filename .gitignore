@@ -1,0 +1,35 @@
+# Compiled binaries — built via 'go build ./cmd/...', never committed.
+# The examples' binaries share their directory name with the package, so they
+# are named explicitly rather than by a pattern that would swallow the dirs.
+/synthigy-gen
+/examples/bff/bff
+/examples/rls-demo/bff/rls-demo-bff
+*.exe
+*.test
+*.prof
+
+# Go workspace — each consumer makes their own
+go.work
+go.work.sum
+
+# Coverage
+coverage.out
+*.cover
+
+# Secrets — NEVER commit
+.env
+.env.local
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# Agent scratch
+.claude/
+CLAUDE.md

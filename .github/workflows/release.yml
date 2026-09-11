@@ -1,0 +1,36 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Go modules have no registry to push to — the tag IS the release. This
+# workflow gates the tag on a green build and warms proxy.golang.org so
+# `go get` resolves immediately instead of on first request.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ['1.22', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '${{ matrix.go }}' }
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  publish:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm the module proxy
+        # Best-effort: the tag is the release either way, this only spares the
+        # first `go get` a cold fetch.
+        run: |
+          curl -sS --retry 5 --retry-delay 10 --retry-all-errors \
+            "https://proxy.golang.org/github.com/synthigy/go/@v/${GITHUB_REF_NAME}.info" || true
