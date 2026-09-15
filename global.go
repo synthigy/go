@@ -243,6 +243,25 @@ func DeployedModel(ctx context.Context, opts ...Opt) (json.RawMessage, error) {
 	return c.DeployedModel(ctx, opts...)
 }
 
+// Deploy deploys a dataset version from a modeler export via the default
+// client. Pass the export file's contents verbatim — the server decodes it.
+func Deploy(ctx context.Context, exportContents string, opts ...Opt) (DeployAck, error) {
+	c, err := dflt()
+	if err != nil {
+		return DeployAck{}, err
+	}
+	return c.Deploy(ctx, exportContents, opts...)
+}
+
+// Destroy destroys a dataset — every version, table and row — by xid.
+func Destroy(ctx context.Context, datasetXid string, opts ...Opt) (bool, error) {
+	c, err := dflt()
+	if err != nil {
+		return false, err
+	}
+	return c.Destroy(ctx, datasetXid, opts...)
+}
+
 func RuntimeModel(ctx context.Context, opts ...Opt) (json.RawMessage, error) {
 	c, err := dflt()
 	if err != nil {

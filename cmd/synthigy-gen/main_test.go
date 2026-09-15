@@ -2,9 +2,9 @@ package main
 
 import (
 	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
-	"go/token"
 	"strings"
 	"testing"
 )
@@ -22,6 +22,22 @@ func TestPascal(t *testing.T) {
 	for _, tc := range cases {
 		if got := pascal(tc.in); got != tc.want {
 			t.Errorf("pascal(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestExported(t *testing.T) {
+	// A pascal skin is authored data: a lowercase first rune emits an
+	// unexported field, which encoding/json drops and `go vet` rejects.
+	cases := []struct{ in, want string }{
+		{"rucOTF", "RucOTF"},
+		{"RUC", "RUC"},
+		{"title", "Title"},
+		{"", "X"},
+	}
+	for _, tc := range cases {
+		if got := exported(tc.in); got != tc.want {
+			t.Errorf("exported(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -90,11 +106,11 @@ func TestGenerateProducesValidGo(t *testing.T) {
 	// (b) + (c) key declarations present
 	wants := []string{
 		"package gen",
-		"type MusicAlbum ",       // read struct (entity-backed namespace alias/type)
-		"type MusicAlbumWrite ",  // write input struct
-		"type MusicAlbumNS ",     // namespace type
+		"type MusicAlbum ",          // read struct (entity-backed namespace alias/type)
+		"type MusicAlbumWrite ",     // write input struct
+		"type MusicAlbumNS ",        // namespace type
 		"func (MusicAlbumNS) List(", // typed read method for the list op
-		"func (MusicAlbumNS) Sync(",  // schema-derived write verb
+		"func (MusicAlbumNS) Sync(", // schema-derived write verb
 		"func (MusicAlbumNS) Delete(",
 		"var API APISurface", // single-client surface
 	}
@@ -175,11 +191,11 @@ func TestGenerateWatchAndXSQLAndSQLTemplate(t *testing.T) {
 	}
 
 	wants := []string{
-		"QueryWatchOf[",         // typed watch for the search op
-		"SqlTemplateWatchOf[",   // typed watch for the sql-template op
-		"MovieListActors",       // nested relation projection struct name
-		"type DashboardStats ",  // sql-template plain result struct
-		"func (DashboardNS) ",   // @namespace routed the sql-template op
+		"QueryWatchOf[",        // typed watch for the search op
+		"SqlTemplateWatchOf[",  // typed watch for the sql-template op
+		"MovieListActors",      // nested relation projection struct name
+		"type DashboardStats ", // sql-template plain result struct
+		"func (DashboardNS) ",  // @namespace routed the sql-template op
 	}
 	for _, w := range wants {
 		if !strings.Contains(src, w) {

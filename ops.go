@@ -69,6 +69,15 @@ func OpSQLTemplate(template string, params any) Op {
 func OpDeployedModel() Op { return Op{"op": "deployed-model"} }
 func OpRuntimeModel() Op  { return Op{"op": "runtime-model"} }
 
+// OpDeploy deploys a dataset version from a modeler export — pass the
+// export file's contents verbatim, the server decodes it.
+func OpDeploy(exportContents string) Op { return Op{"op": "deploy", "data": exportContents} }
+
+// OpDestroy destroys a dataset (every version, table and row) by xid.
+func OpDestroy(datasetXid string) Op {
+	return Op{"op": "delete", "entity": "dataset", "data": map[string]any{"xid": datasetXid}}
+}
+
 // OpDescribe compiles XSQL op-doc source into the codegen IR. `source` is one
 // or more .xsql files concatenated; the result Data is `{operations:[...]}`.
 // Used by the synthigy-gen code generator to pull typed ops from the server.

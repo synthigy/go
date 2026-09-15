@@ -49,6 +49,13 @@
 package synthigy
 
 // Version is the SDK version. Kept in step with the JS SDK package version.
+// PlatformAudience is the platform API this SDK is a client of. /data,
+// /schema, /history, /logs and subscriptions all require a token bound to it.
+// It names the API, never a deployment, so it is the same string on localhost
+// and in production — which is why it is a constant rather than something
+// every caller configures.
+const PlatformAudience = "https://synthigy.com"
+
 const Version = "0.1.0"
 
 // Record is a single entity record as returned by the /data endpoint —

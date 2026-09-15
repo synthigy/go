@@ -231,8 +231,9 @@ go test -tags integration ./...    # against a live server (env-gated)
 ```
 
 Set `SYNTHIGY_ENDPOINT` plus `SYNTHIGY_CLIENT_ID`/`SYNTHIGY_CLIENT_SECRET` (or
-`SYNTHIGY_TOKEN`) for integration tests. See `examples/bff` for a runnable
-service example.
+`SYNTHIGY_TOKEN`) for integration tests. Runnable services live in
+[synthigy/examples](https://github.com/synthigy/examples): `movies/go` for the
+smallest shape, `rls-demo/go` for the access-control BFF.
 ```
 
 ## License

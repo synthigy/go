@@ -237,3 +237,47 @@ func TestDecodeSliceEmptyOnNull(t *testing.T) {
 		t.Fatalf("decodeSlice(null) = %v, %v; want empty non-nil slice", out, err)
 	}
 }
+
+func TestDeployPostsExportContentsVerbatim(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeResults(w, []map[string]any{{"ok": true, "data": map[string]any{"deployed": true, "version": "0.3", "dataset": "ds-1"}}})
+	}))
+	ack, err := c.Deploy(context.Background(), `{"~:xid":"v-1"}`)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if ack != (DeployAck{Deployed: true, Version: "0.3", Dataset: "ds-1"}) {
+		t.Fatalf("Deploy ack = %+v", ack)
+	}
+	ops := gotBody["operations"].([]any)
+	op := ops[0].(map[string]any)
+	if op["op"] != "deploy" || op["data"] != `{"~:xid":"v-1"}` {
+		t.Fatalf("wire op = %+v", op)
+	}
+	if _, hasEntity := op["entity"]; hasEntity {
+		t.Fatalf("deploy must not carry an entity")
+	}
+}
+
+func TestDestroyIsDeleteOnDatasetByXid(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeResults(w, []map[string]any{{"ok": true, "data": true}})
+	}))
+	ok, err := c.Destroy(context.Background(), "ds-1")
+	if err != nil || !ok {
+		t.Fatalf("Destroy = %v, %v; want true, nil", ok, err)
+	}
+	ops := gotBody["operations"].([]any)
+	op := ops[0].(map[string]any)
+	if op["op"] != "delete" || op["entity"] != "dataset" {
+		t.Fatalf("wire op = %+v", op)
+	}
+	data := op["data"].(map[string]any)
+	if data["xid"] != "ds-1" {
+		t.Fatalf("data = %+v", data)
+	}
+}

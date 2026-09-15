@@ -89,6 +89,41 @@ func (c *Client) DeployedModel(ctx context.Context, opts ...Opt) (json.RawMessag
 	return r.Data, nil
 }
 
+// DeployAck is what Deploy acks with — Dataset is the xid Destroy takes.
+type DeployAck struct {
+	Deployed bool   `json:"deployed"`
+	Version  string `json:"version"`
+	Dataset  string `json:"dataset"`
+}
+
+// Deploy deploys a dataset version from a modeler export. Pass the export
+// file's contents verbatim — the server decodes it. Requires dataset:deploy.
+func (c *Client) Deploy(ctx context.Context, exportContents string, opts ...Opt) (DeployAck, error) {
+	r, err := c.execOne(ctx, OpDeploy(exportContents), opts...)
+	if err != nil {
+		return DeployAck{}, err
+	}
+	var ack DeployAck
+	if err := json.Unmarshal(r.Data, &ack); err != nil {
+		return DeployAck{}, newError("failed to decode deploy result: "+err.Error(), "INTERNAL_ERROR")
+	}
+	return ack, nil
+}
+
+// Destroy destroys a dataset — every version, table and row. Requires
+// dataset:delete. Idempotent.
+func (c *Client) Destroy(ctx context.Context, datasetXid string, opts ...Opt) (bool, error) {
+	r, err := c.execOne(ctx, OpDestroy(datasetXid), opts...)
+	if err != nil {
+		return false, err
+	}
+	var ok bool
+	if err := json.Unmarshal(r.Data, &ok); err != nil {
+		return false, newError("failed to decode destroy result: "+err.Error(), "INTERNAL_ERROR")
+	}
+	return ok, nil
+}
+
 // RuntimeModel fetches the runtime ERD model — the deployed model augmented
 // with identity attrs, audit attrs, and reference-as-relation expansion.
 // Requires dataset:load scope.

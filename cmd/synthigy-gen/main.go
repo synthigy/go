@@ -44,6 +44,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	synthigy "github.com/synthigy/go"
 )
@@ -469,8 +470,12 @@ func generate(pkg string, I *ir, S *schema) string {
 // entityStructs emits the read struct and the Write struct for one entity.
 func (g *generator) entityStructs(name string, e entity) string {
 	P := entityPascal(g.schema, name)
-	attrPascal := func(a string) string { return skinOr(e.Attributes[a].Skins, "pascal", pascal(a)) }
-	relPascalOf := func(r string) string { return skinOr(e.Relations[r].Skins, "pascal", pascal(r)) }
+	attrPascal := func(a string) string {
+		return exported(skinOr(e.Attributes[a].Skins, "pascal", pascal(a)))
+	}
+	relPascalOf := func(r string) string {
+		return exported(skinOr(e.Relations[r].Skins, "pascal", pascal(r)))
+	}
 	// deterministic attribute order
 	attrNames := make([]string, 0, len(e.Attributes))
 	for a := range e.Attributes {
@@ -815,7 +820,19 @@ func skinOr(skins map[string]string, format, fallback string) string {
 }
 
 func entityPascal(S *schema, n string) string {
-	return skinOr(S.Entities[n].Skins, "pascal", pascal(n))
+	return exported(skinOr(S.Entities[n].Skins, "pascal", pascal(n)))
+}
+
+// A pascal skin is authored data, never a Go identifier. One with a lowercase
+// first rune ("rucOTF") emits an UNEXPORTED field: encoding/json drops it
+// without a word, and `go vet` fails the whole package for tagging it.
+func exported(s string) string {
+	if s == "" {
+		return "X"
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 func pascal(s string) string {

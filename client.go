@@ -23,11 +23,9 @@ type Config struct {
 	ClientSecret string
 	Scope        string
 
-	// Audience binds a default client_credentials audience to every request
-	// this Client makes. The platform's audience model is opt-in: a mint
-	// naming no audience resolves to the identity-only OIDC audience, which
-	// /data rejects. Set it to the server's /data audience (published at
-	// /.well-known/synthigy as auth.oidc.audience).
+	// Audience overrides the audience bound to every mint this Client makes.
+	// Leave it empty: it defaults to PlatformAudience, which is what /data,
+	// /schema, /history, /logs and subscriptions require.
 	Audience string
 
 	// Static bearer token (alternative to client credentials). Empty string
@@ -102,8 +100,16 @@ func newClient(cfg Config) (*Client, error) {
 		return nil, newError("endpoint is required", "INVALID_BODY")
 	}
 	endpoint := strings.TrimRight(cfg.Endpoint, "/")
+	// This SDK is the client for the platform API, so that is what it mints
+	// for. Nothing to configure, and nowhere to look the value up if there
+	// were: the server does not advertise it in discovery. Minting a token for
+	// some OTHER API is a per-call Audience option. The env var is an escape
+	// hatch, not the normal path.
 	if cfg.Audience == "" {
 		cfg.Audience = os.Getenv("SYNTHIGY_AUDIENCE")
+	}
+	if cfg.Audience == "" {
+		cfg.Audience = PlatformAudience
 	}
 
 	hc := cfg.HTTPClient
