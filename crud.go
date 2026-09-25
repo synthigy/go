@@ -46,7 +46,7 @@ func (c *Client) Get(ctx context.Context, entity string, args Args, sel Selectio
 //	        },
 //	    },
 //	})
-//	// → row["_agg"] == {"users": {"sum": {"priority": 60}}}
+//	// → row["_agg"] == {"users": {"priority": {"sum": 60, "avg": 20}}}
 //
 // These normalize to the same wire shape as relations and need no special
 // API. For aggregation that is NOT a relation rollup (totals across an
@@ -71,6 +71,42 @@ func (c *Client) Stack(ctx context.Context, entity string, data map[string]any, 
 		return nil, err
 	}
 	return asRecord(r.Data)
+}
+
+// WriteResult is what SyncMany/StackMany return: Count always, and the
+// written records when the call passed Returning().
+type WriteResult struct {
+	Count   int
+	Records []Record
+}
+
+// SyncMany upserts many records of one entity in ONE operation — the bulk
+// form of Sync, for imports.
+func (c *Client) SyncMany(ctx context.Context, entity string, records []map[string]any, opts ...Opt) (WriteResult, error) {
+	return c.writeMany(ctx, OpSync(entity, records, applyOpts(opts).returning), opts)
+}
+
+// StackMany is the bulk form of Stack.
+func (c *Client) StackMany(ctx context.Context, entity string, records []map[string]any, opts ...Opt) (WriteResult, error) {
+	return c.writeMany(ctx, OpStack(entity, records, applyOpts(opts).returning), opts)
+}
+
+func (c *Client) writeMany(ctx context.Context, op Op, opts []Opt) (WriteResult, error) {
+	r, err := c.execOne(ctx, op, opts...)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	if applyOpts(opts).returning {
+		recs, err := asRecords(r.Data)
+		return WriteResult{Count: len(recs), Records: recs}, err
+	}
+	var silent struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(r.Data, &silent); err != nil {
+		return WriteResult{}, newError("failed to decode write result: "+err.Error(), "INTERNAL_ERROR")
+	}
+	return WriteResult{Count: silent.Count}, nil
 }
 
 // Slice removes specific relations from an entity, returning a map of
@@ -249,6 +285,23 @@ func QueryAs[T any](ctx context.Context, xsql string, params map[string]any, opt
 		return nil, err
 	}
 	return decodeSlice[T](data)
+}
+
+// ResultAs decodes one Exec result into []T; a failed op is its *Error.
+func ResultAs[T any](r OpResult) ([]T, error) {
+	if !r.OK {
+		return nil, errorFromServer(r.Error, 0, r.RequestID)
+	}
+	return decodeSlice[T](r.Data)
+}
+
+// ResultOneAs decodes one Exec result into *T (nil when there is no record);
+// a failed op is its *Error.
+func ResultOneAs[T any](r OpResult) (*T, error) {
+	if !r.OK {
+		return nil, errorFromServer(r.Error, 0, r.RequestID)
+	}
+	return decodePtr[T](r.Data)
 }
 
 func decodeSlice[T any](data json.RawMessage) ([]T, error) {

@@ -281,3 +281,44 @@ func TestDestroyIsDeleteOnDatasetByXid(t *testing.T) {
 		t.Fatalf("data = %+v", data)
 	}
 }
+
+// Bulk import: one operation carries every record, silent by default.
+func TestSyncManySendsOneOpWithAllRecords(t *testing.T) {
+	var ops []map[string]any
+	returning := false
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Operations []map[string]any `json:"operations"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ops = body.Operations
+		if returning {
+			writeResults(w, []map[string]any{{"ok": true, "data": []map[string]any{{"xid": "a"}, {"xid": "b"}}}})
+			return
+		}
+		writeResults(w, []map[string]any{{"ok": true, "data": map[string]any{"count": 2}}})
+	}))
+	ctx := context.Background()
+	res, err := c.SyncMany(ctx, "movie", []map[string]any{{"title": "A"}, {"title": "B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0]["op"] != "sync" || len(ops[0]["data"].([]any)) != 2 || ops[0]["returning"] != false {
+		t.Fatalf("wire ops = %v", ops)
+	}
+	if res.Count != 2 || res.Records != nil {
+		t.Fatalf("silent result = %+v", res)
+	}
+
+	returning = true
+	res, err = c.StackMany(ctx, "movie", []map[string]any{{"xid": "a"}, {"xid": "b"}}, Returning())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ops[0]["op"] != "stack" || ops[0]["returning"] != true {
+		t.Fatalf("wire ops = %v", ops)
+	}
+	if res.Count != 2 || len(res.Records) != 2 || res.Records[1]["xid"] != "b" {
+		t.Fatalf("returning result = %+v", res)
+	}
+}

@@ -32,16 +32,18 @@ func OpSearch(entity string, args Args, sel Selection) Op {
 func OpGet(entity string, args Args, sel Selection) Op {
 	return Op{"op": "get", "entity": entity, "args": args, "selections": normalizeSelection(sel)}
 }
-// OpSync builds a sync op. The server answers {"count": n}; pass returning
-// true for the written records. Mint ids with NewXID when you need them up
-// front — that is the cheap way to know what you wrote.
-func OpSync(entity string, data map[string]any, returning ...bool) Op {
+
+// OpSync builds a sync op for one record (a map) or many (a slice of maps).
+// The server answers {"count": n}; pass returning true for the written
+// records. Mint ids with NewXID when you need them up front — that is the
+// cheap way to know what you wrote.
+func OpSync(entity string, data any, returning ...bool) Op {
 	return Op{"op": "sync", "entity": entity, "data": data,
 		"returning": len(returning) > 0 && returning[0]}
 }
 
-// OpStack builds a stack op. Same returning contract as OpSync.
-func OpStack(entity string, data map[string]any, returning ...bool) Op {
+// OpStack builds a stack op, one record or many. Same returning contract as OpSync.
+func OpStack(entity string, data any, returning ...bool) Op {
 	return Op{"op": "stack", "entity": entity, "data": data,
 		"returning": len(returning) > 0 && returning[0]}
 }
@@ -66,6 +68,17 @@ func OpSQLTemplate(template string, params any) Op {
 	}
 	return Op{"op": "sql-template", "template": template, "params": params}
 }
+
+// OpQuery builds an XSQL read for an Exec batch; verb names the op a bare
+// body runs as (default "search").
+func OpQuery(xsql string, params map[string]any, verb string) Op {
+	op := Op{"op": "xsql", "xsql": xsqlDocument(xsql, firstNonEmpty(verb, "search"))}
+	if params != nil {
+		op["params"] = params
+	}
+	return op
+}
+
 func OpDeployedModel() Op { return Op{"op": "deployed-model"} }
 func OpRuntimeModel() Op  { return Op{"op": "runtime-model"} }
 
@@ -78,10 +91,21 @@ func OpDestroy(datasetXid string) Op {
 	return Op{"op": "delete", "entity": "dataset", "data": map[string]any{"xid": datasetXid}}
 }
 
-// OpDescribe compiles XSQL op-doc source into the codegen IR. `source` is one
-// or more .xsql files concatenated; the result Data is `{operations:[...]}`.
-// Used by the synthigy-gen code generator to pull typed ops from the server.
+// OpDescribe compiles one XSQL program into the codegen IR; the result Data is
+// `{operations:[...]}`. For several .xsql files use OpDescribeFiles —
+// concatenating them changes what each file's @namespace means.
 func OpDescribe(source string) Op { return Op{"op": "describe", "source": source} }
+
+// DescribeFile is one .xsql file for OpDescribeFiles.
+type DescribeFile struct {
+	Path   string `json:"path"`
+	Source string `json:"source"`
+}
+
+// OpDescribeFiles compiles several .xsql files into one IR. Each file is parsed
+// on its own, so its buffer-level @namespace stays in it; a (namespace, name)
+// declared twice across files fails with DUPLICATE_OPERATION.
+func OpDescribeFiles(files []DescribeFile) Op { return Op{"op": "describe", "sources": files} }
 
 // Exec runs raw operations against the /data endpoint and returns the
 // per-op results. A top-level server error is returned as an *Error; per-op

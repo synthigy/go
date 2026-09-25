@@ -2,7 +2,7 @@
 // data model. It PULLS the contract (schema + op IR) straight from the server
 // — no Node, no separate tool — then emits typed structs + methods.
 //
-// The typical Go workflow: put your .xsql op files in ./synthigy, add one
+// The typical Go workflow: put your .xsql op files in ./xsql, add one
 // directive, and `go generate ./...` does the rest:
 //
 //	//go:generate go run github.com/synthigy/go/cmd/synthigy-gen -pull
@@ -13,12 +13,13 @@
 // Flags:
 //
 //	synthigy-gen [-endpoint URL] [-xsql DIR] [-out DIR] [-package NAME] [-pull] [-check]
-//	  -endpoint  server URL      (default $SYNTHIGY_ENDPOINT or http://localhost:7887)
-//	  -xsql      .xsql + snapshot dir   (default ./synthigy)
+//	  -endpoint  server URL      (default $SYNTHIGY_ENDPOINT)
+//	  -xsql      .xsql + snapshot dir   (default ./xsql)
 //	  -out       generated-code dir     (default ./gen)
 //	  -package   package name           (default: base name of -out)
 //	  -pull      re-pull schema + IR from the server (else generate from the
-//	             committed ./synthigy/{schema.json,ops.ir.json} snapshots)
+//	             committed ./xsql/{schema.json,ops.ir.json} snapshots; a
+//	             stale IR is refreshed, never generated from)
 //	  -check     CI drift gate: exit 1 when the .xsql sources no longer hash to
 //	             the IR's sourceHash. Offline — no server, no credentials.
 //
@@ -40,8 +41,10 @@ import (
 	"flag"
 	"fmt"
 	"go/format"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -65,6 +68,7 @@ type op struct {
 	Watch     json.RawMessage `json:"watch"`
 	Result    result          `json:"result"`
 	Batch     bool            `json:"batch"`
+	Members   []string        `json:"members"`
 }
 
 type param struct {
@@ -115,8 +119,8 @@ type relation struct {
 // ── main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	endpoint := flag.String("endpoint", envOr("SYNTHIGY_ENDPOINT", "http://localhost:7887"), "Synthigy server URL")
-	xsqlDir := flag.String("xsql", "./synthigy", "directory of .xsql op files + committed snapshots")
+	endpoint := flag.String("endpoint", os.Getenv("SYNTHIGY_ENDPOINT"), "Synthigy server URL")
+	xsqlDir := flag.String("xsql", "./xsql", "directory of .xsql op files (searched recursively) + committed snapshots")
 	outDir := flag.String("out", "./gen", "output directory for generated Go")
 	pkg := flag.String("package", "", "package name (default: base name of -out)")
 	pull := flag.Bool("pull", false, "re-pull schema + IR from the server before generating")
@@ -146,10 +150,9 @@ func main() {
 		name = filepath.Base(*outDir)
 	}
 
-	// Contract between the .xsql sources on disk and the committed IR: the IR
-	// carries the hash of the sources it was described from. Mismatch = stale.
-	// -check gates on it offline; a plain run only warns, so `go generate` keeps
-	// working without a server.
+	// The IR carries the hash of the sources it was described from; a mismatch
+	// refreshes it from the server and never generates from the stale one.
+	stale := false
 	if drifted, savedHash := sourcesDrifted(*xsqlDir, irPath); drifted {
 		msg := "sources drifted from " + irPath
 		if savedHash == "" {
@@ -160,7 +163,8 @@ func main() {
 			os.Exit(1)
 		}
 		if !*pull {
-			fmt.Fprintf(os.Stderr, "warning: %s — generating from the stale IR; re-pull to refresh\n", msg)
+			fmt.Fprintf(os.Stderr, "%s — refreshing\n", msg)
+			stale = true
 		}
 	} else if *check {
 		if !exists(irPath) {
@@ -171,10 +175,13 @@ func main() {
 		return
 	}
 
-	// Pull when asked, or when a snapshot is missing (first run).
-	if *pull || !exists(schemaPath) || !exists(irPath) {
+	// Pull when asked, when the IR is stale, or when a snapshot is missing (first run).
+	if *pull || stale || !exists(schemaPath) || !exists(irPath) {
 		if err := doPull(*endpoint, *xsqlDir, schemaPath, irPath); err != nil {
 			fmt.Fprintf(os.Stderr, "pull failed: %v\n", err)
+			if stale {
+				fmt.Fprintln(os.Stderr, "the .xsql changed since the last pull — reach the server (synthigy exec -- go generate) or revert the edit")
+			}
 			os.Exit(1)
 		}
 	}
@@ -215,12 +222,22 @@ func doPull(endpoint, xsqlDir, schemaPath, irPath string) error {
 	if err != nil {
 		return err
 	}
-	res, err := c.Exec(ctx, []synthigy.Op{synthigy.OpDescribe(src)})
+	files, err := readXSQLFiles(xsqlDir)
+	if err != nil {
+		return err
+	}
+	res, err := c.Exec(ctx, []synthigy.Op{synthigy.OpDescribeFiles(files)})
 	if err != nil {
 		return fmt.Errorf("describe: %w", err)
 	}
-	if len(res) == 0 || !res[0].OK {
+	if len(res) == 0 {
 		return fmt.Errorf("describe returned no IR")
+	}
+	if !res[0].OK {
+		if e := res[0].Error; e != nil {
+			return fmt.Errorf("describe: %s (%s)", e.Message, e.Code)
+		}
+		return fmt.Errorf("describe failed with no error detail")
 	}
 	// res[0].Data is `{operations:[...]}` — re-indent for a clean committed diff.
 	var irAny map[string]any
@@ -273,32 +290,75 @@ func sourcesDrifted(xsqlDir, irPath string) (bool, string) {
 	return saved.SourceHash != sourceHash(src), saved.SourceHash
 }
 
-// readXSQL concatenates every *.xsql file in dir (sorted) into one source, the
-// same way the server's describe expects independent, uniquely-named ops.
+// readXSQL merges every *.xsql under dir (recursive, sorted by relative path)
+// into one describe document; only the first file keeps its `@workspace`.
 func readXSQL(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
+	var rels []string
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".xsql") {
+			rel, _ := filepath.Rel(dir, p)
+			rels = append(rels, filepath.ToSlash(rel))
+		}
+		return nil
+	})
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", dir, err)
 	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".xsql") {
-			names = append(names, e.Name())
-		}
-	}
-	if len(names) == 0 {
+	if len(rels) == 0 {
 		return "", fmt.Errorf("no .xsql files in %s", dir)
 	}
-	sort.Strings(names)
+	sort.Strings(rels)
 	var parts []string
-	for _, n := range names {
-		b, err := os.ReadFile(filepath.Join(dir, n))
+	for i, rel := range rels {
+		b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
 		if err != nil {
 			return "", err
 		}
-		parts = append(parts, string(b))
+		src := string(b)
+		if i > 0 {
+			src = dropWorkspace(src)
+		}
+		parts = append(parts, src)
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+// readXSQLFiles lists every *.xsql under dir for describe, one entry per file,
+// in the same order readXSQL merges them.
+func readXSQLFiles(dir string) ([]synthigy.DescribeFile, error) {
+	var files []synthigy.DescribeFile
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".xsql") {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		files = append(files, synthigy.DescribeFile{Path: filepath.ToSlash(rel), Source: string(b)})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", dir, err)
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
+}
+
+var workspaceLine = regexp.MustCompile(`^@workspace\b`)
+
+func dropWorkspace(src string) string {
+	var kept []string
+	for _, l := range strings.Split(src, "\n") {
+		if !workspaceLine.MatchString(l) {
+			kept = append(kept, l)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // emit loads the IR + schema snapshots and writes gofmt'd typed Go.
@@ -320,14 +380,11 @@ func emit(irPath, schemaPath, outPath, pkg string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("wrote %s (%d entities, %d ops)\n", outPath, len(S.Entities), countOps(&I))
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	batches := ""
+	if n := len(I.Operations) - countOps(&I); n > 0 {
+		batches = fmt.Sprintf(", %d batches", n)
 	}
-	return def
+	fmt.Printf("wrote %s (%d entities, %d ops%s)\n", outPath, len(S.Entities), countOps(&I), batches)
 }
 
 func exists(path string) bool {
@@ -413,8 +470,16 @@ func generate(pkg string, I *ir, S *schema) string {
 		nsOf(entityPascal(S, n))
 	}
 
+	var genOps []genOp
+	var batches []op
 	for _, o := range I.Operations {
 		if o.Batch {
+			batches = append(batches, o)
+			continue
+		}
+		if mutateVerbs[o.Op] {
+			fmt.Fprintf(os.Stderr, "skipped @%s %s — mutations are generated from the schema; use gen.API.%s.%s(ctx, data)\n",
+				o.Op, o.Name, entityPascal(S, o.Entity), pascal(o.Op))
 			continue
 		}
 		nsName := o.Namespace
@@ -425,7 +490,13 @@ func generate(pkg string, I *ir, S *schema) string {
 			fmt.Fprintf(os.Stderr, "op %q: sql-template with no root entity needs @namespace\n", o.Name)
 			os.Exit(1)
 		}
-		g.emitOp(nsOf(entityPascal(S, nsName)), o)
+		ns := nsOf(entityPascal(S, nsName))
+		g.emitOp(ns, o)
+		genOps = append(genOps, genOp{o: o, typeName: ns.name + pascal(o.Name)})
+	}
+	var batchCode []string
+	for _, b := range batches {
+		batchCode = append(batchCode, g.emitBatch(b, genOps, nsMap))
 	}
 
 	// ── assemble ──
@@ -435,6 +506,7 @@ func generate(pkg string, I *ir, S *schema) string {
 	b.WriteString("import (\n\t\"context\"\n\t\"encoding/json\"\n\n\tsynthigy \"github.com/synthigy/go\"\n)\n\n")
 	b.WriteString("// Link is a relation reference by identity, used in write payloads.\ntype Link struct {\n\tXid string `json:\"xid\"`\n}\n\n")
 	b.WriteString("// toMap converts a typed struct to the wire map via its json tags.\nfunc toMap(v any) map[string]any {\n\tvar m map[string]any\n\tb, _ := json.Marshal(v)\n\t_ = json.Unmarshal(b, &m)\n\treturn m\n}\n\n")
+	b.WriteString("// toMaps converts typed structs to wire maps, one per record.\nfunc toMaps[T any](vs []T) []map[string]any {\n\tout := make([]map[string]any, len(vs))\n\tfor i, v := range vs {\n\t\tout[i] = toMap(v)\n\t}\n\treturn out\n}\n\n")
 
 	b.WriteString("// ── Layer 1: entity read + write structs ──\n\n")
 	b.WriteString(strings.Join(layer1, "\n\n"))
@@ -463,6 +535,9 @@ func generate(pkg string, I *ir, S *schema) string {
 	// collide with the entity read types.
 	fmt.Fprintf(&b, "// APISurface is the typed single-client surface: one field per entity/@namespace.\ntype APISurface struct {\n%s\n}\n\n", strings.Join(nsFields, "\n"))
 	fmt.Fprintf(&b, "// API is the ready-to-use typed surface. Every op runs on the process-wide\n// default client installed by synthigy.Connect:\n//\n//\tgen.API.Project.List(ctx, gen.ProjectListParams{})\nvar API APISurface\n")
+	for _, c := range batchCode {
+		b.WriteString("\n" + c + "\n")
+	}
 
 	return b.String()
 }
@@ -530,6 +605,128 @@ func (g *generator) entityStructs(name string, e entity) string {
 	return fmt.Sprintf("type %s struct {\n%s\n}\n\ntype %sWrite struct {\n%s\n}",
 		P, strings.Join(read, "\n"), P, strings.Join(write, "\n"))
 }
+
+// genOp is a generated read, kept for @batch member resolution.
+type genOp struct {
+	o        op
+	typeName string
+}
+
+func opIdentity(o op) string {
+	ns := o.Namespace
+	if ns == "" {
+		ns = o.Entity
+	}
+	return strings.ToLower(ns) + "/" + strings.ToLower(o.Name)
+}
+
+// resolveMember finds a @batch member: a bare name must be unique, ns/name
+// qualifies it.
+func resolveMember(batch, ref string, ops []genOp) genOp {
+	ns, nm := "", strings.ToLower(ref)
+	if i := strings.LastIndex(ref, "/"); i >= 0 {
+		ns, nm = strings.ToLower(ref[:i]), strings.ToLower(ref[i+1:])
+	}
+	var matches []genOp
+	for _, g := range ops {
+		gns := g.o.Namespace
+		if gns == "" {
+			gns = g.o.Entity
+		}
+		if strings.ToLower(g.o.Name) == nm && (ns == "" || strings.ToLower(gns) == ns) {
+			matches = append(matches, g)
+		}
+	}
+	if len(matches) == 0 {
+		fmt.Fprintf(os.Stderr, "@batch %s references unknown/ungenerated op %s\n", batch, ref)
+		os.Exit(1)
+	}
+	if ns == "" && len(matches) > 1 {
+		ids := make([]string, len(matches))
+		for i, m := range matches {
+			ids[i] = opIdentity(m.o)
+		}
+		fmt.Fprintf(os.Stderr, "@batch %s — %s is ambiguous: %s — qualify the reference\n", batch, ref, strings.Join(ids, ", "))
+		os.Exit(1)
+	}
+	return matches[0]
+}
+
+// emitBatch renders @batch <name>: <m1> <m2> as a method on APISurface that
+// sends every member in ONE Exec. Each member gets a result field and an error
+// field: a failed member carries its error and leaves the others intact. Params
+// are one struct shared by every member (a name two members declare binds the
+// same value in both; it is optional only if every member says so).
+func (g *generator) emitBatch(b op, ops []genOp, nsMap map[string]*nsData) string {
+	B := pascal(b.Name)
+	if _, clash := nsMap[B]; clash {
+		fmt.Fprintf(os.Stderr, "@batch %s clashes with namespace %s on gen.API — rename the batch\n", b.Name, B)
+		os.Exit(1)
+	}
+	var members []genOp
+	for _, ref := range b.Members {
+		members = append(members, resolveMember(b.Name, ref, ops))
+	}
+	var params []param
+	idx := map[string]int{}
+	for _, m := range members {
+		for _, p := range m.o.Params {
+			if i, ok := idx[p.Name]; ok {
+				if !p.Optional {
+					params[i].Optional = false
+				}
+				continue
+			}
+			idx[p.Name] = len(params)
+			params = append(params, p)
+		}
+	}
+	count := map[string]int{}
+	for _, m := range members {
+		count[strings.ToLower(m.o.Name)]++
+	}
+	field := func(m genOp) string {
+		if count[strings.ToLower(m.o.Name)] > 1 {
+			return m.typeName
+		}
+		return pascal(m.o.Name)
+	}
+
+	var fields, calls, decodes []string
+	for i, m := range members {
+		F := field(m)
+		t := "[]" + m.typeName
+		decode := fmt.Sprintf("synthigy.ResultAs[%s](rs[%d])", m.typeName, i)
+		if m.o.Op == "get" {
+			t = "*" + m.typeName
+			decode = fmt.Sprintf("synthigy.ResultOneAs[%s](rs[%d])", m.typeName, i)
+		}
+		fields = append(fields, fmt.Sprintf("\t%s %s\n\t%sErr error", F, t, F))
+		if m.o.Op == "sql-template" {
+			calls = append(calls, fmt.Sprintf("\t\tsynthigy.OpSQLTemplate(%s, p),", backquote(m.o.Source)))
+		} else {
+			calls = append(calls, fmt.Sprintf("\t\tsynthigy.OpQuery(%s, p, %q),", backquote("@"+m.o.Op+" "+m.o.Name+"\n"+m.o.Source), m.o.Op))
+		}
+		decodes = append(decodes, fmt.Sprintf("\tout.%s, out.%sErr = %s", F, F, decode))
+	}
+
+	var out []string
+	sig := fmt.Sprintf("func (APISurface) %s(ctx context.Context, opts ...synthigy.Opt) (*%sBatch, error)", B, B)
+	pinit := "\tvar p map[string]any"
+	if len(params) > 0 {
+		pt := B + "BatchParams"
+		out = append(out, g.paramsStruct(pt, params))
+		sig = fmt.Sprintf("func (APISurface) %s(ctx context.Context, params %s, opts ...synthigy.Opt) (*%sBatch, error)", B, pt, B)
+		pinit = "\tp := params.toParams()"
+	}
+	out = append(out, fmt.Sprintf("// %sBatch holds each member's result; a failed member carries its error in\n// the matching Err field and leaves the others intact.\ntype %sBatch struct {\n%s\n}", B, B, strings.Join(fields, "\n")))
+	out = append(out, fmt.Sprintf("// %s runs %s as ONE request.\n%s {\n%s\n\trs, err := synthigy.Exec(ctx, []synthigy.Op{\n%s\n\t}, opts...)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tvar out %sBatch\n%s\n\treturn &out, nil\n}",
+		B, strings.Join(b.Members, " + "), sig, pinit, strings.Join(calls, "\n"), B, strings.Join(decodes, "\n")))
+	return strings.Join(out, "\n\n")
+}
+
+// mutateVerbs are XSQL ops codegen never emits: writes come from the schema.
+var mutateVerbs = map[string]bool{"sync": true, "stack": true, "delete": true}
 
 // emitOp adds an op's types + method to its namespace.
 func (g *generator) emitOp(ns *nsData, o op) {
@@ -678,6 +875,8 @@ func (g *generator) namespaceType(ns *nsData) string {
 		out = append(out,
 			fmt.Sprintf("// Sync upserts %s, REPLACING relation link-sets. Writes are silent by\n// default — the Record is {\"count\": n}. Pass synthigy.Returning() for the\n// written record, or mint the id up front with synthigy.NewXID().\nfunc (%sNS) Sync(ctx context.Context, data %sWrite, opts ...synthigy.Opt) (synthigy.Record, error) {\n\treturn synthigy.Sync(ctx, %q, toMap(data), opts...)\n}", e, P, P, e),
 			fmt.Sprintf("// Stack writes %s additively — relation links are ADDED, never removed.\n// Same returning contract as Sync.\nfunc (%sNS) Stack(ctx context.Context, data %sWrite, opts ...synthigy.Opt) (synthigy.Record, error) {\n\treturn synthigy.Stack(ctx, %q, toMap(data), opts...)\n}", e, P, P, e),
+			fmt.Sprintf("// SyncMany upserts many %s records in ONE operation — the bulk form of Sync.\nfunc (%sNS) SyncMany(ctx context.Context, data []%sWrite, opts ...synthigy.Opt) (synthigy.WriteResult, error) {\n\treturn synthigy.SyncMany(ctx, %q, toMaps(data), opts...)\n}", e, P, P, e),
+			fmt.Sprintf("// StackMany is the bulk form of Stack.\nfunc (%sNS) StackMany(ctx context.Context, data []%sWrite, opts ...synthigy.Opt) (synthigy.WriteResult, error) {\n\treturn synthigy.StackMany(ctx, %q, toMaps(data), opts...)\n}", P, P, e),
 			fmt.Sprintf("func (%sNS) Delete(ctx context.Context, xid string, opts ...synthigy.Opt) (bool, error) {\n\treturn synthigy.Delete(ctx, %q, map[string]any{\"xid\": xid}, opts...)\n}", P, e),
 		)
 	}
@@ -810,7 +1009,7 @@ func mapFieldName(key string) string {
 	return pascal(strings.TrimPrefix(key, "_"))
 }
 
-// skinOr prefers the server-rendered skin (docs/plans/PLAN-SCHEMA-SKINS-PROJECTION.md)
+// skinOr prefers the server-rendered skin
 // over the local splitter — falls back only when the schema carries no entry.
 func skinOr(skins map[string]string, format, fallback string) string {
 	if v, ok := skins[format]; ok && v != "" {

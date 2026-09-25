@@ -78,6 +78,50 @@ func (c *Client) Lint(ctx context.Context, source string, opts ...Opt) ([]Diagno
 	return out.Diagnostics, nil
 }
 
+// Compile turns an XSQL source into the wire operation the engine would
+// execute (POST /compile) — nothing runs. The compiler is the authority on
+// the wire format, so this is how you take programmatic control of a query
+// instead of hand-writing the map: edit what comes back and pass it to Exec.
+// params bind exactly as they do on Query, so the result IS what the engine
+// receives. A bare rooted body gets a synthetic `@<verb> _q` header; the verb
+// defaults to "search" (pass WireOp("get") for a unique-key read).
+func (c *Client) Compile(ctx context.Context, xsql string, params map[string]any, opts ...Opt) (Op, error) {
+	o := applyOpts(opts)
+	op := Op{"op": "xsql", "xsql": xsqlDocument(xsql, firstNonEmpty(o.op, "search"))}
+	if params != nil {
+		op["params"] = params
+	}
+	data, _ := json.Marshal(map[string]any{"operations": []Op{op}})
+	resp, err := c.fetchAuth(ctx, http.MethodPost, c.endpoint+"/compile", data,
+		map[string]string{"Content-Type": "application/json"}, true)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw := readBody(resp)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, httpError(raw, resp.StatusCode, "Compile request failed")
+	}
+	var out struct {
+		Results []struct {
+			OK        bool         `json:"ok"`
+			Operation Op           `json:"operation"`
+			Error     *serverError `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, newError("failed to decode compile result: "+err.Error(), "INTERNAL_ERROR")
+	}
+	if len(out.Results) == 0 {
+		return nil, newError("compile returned no results", "INTERNAL_ERROR")
+	}
+	r := out.Results[0]
+	if !r.OK {
+		return nil, errorFromServer(r.Error, resp.StatusCode, "")
+	}
+	return r.Operation, nil
+}
+
 // DeployedModel fetches the raw deployed ERD model (modeler-authored shape).
 // Most consumers want RuntimeModel instead. Requires dataset:load scope. The
 // server currently returns this as a transit-encoded JSON string.

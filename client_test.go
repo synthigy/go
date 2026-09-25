@@ -342,3 +342,23 @@ func TestQuerySendsXsqlDocumentOp(t *testing.T) {
 		t.Fatalf("document source not passed verbatim: %q", doc)
 	}
 }
+
+func TestEndpointDefaultsToEnv(t *testing.T) {
+	t.Setenv("SYNTHIGY_ENDPOINT", "http://example.test/")
+	c, err := New(Config{Token: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.endpoint != "http://example.test" {
+		t.Fatalf("endpoint = %q", c.endpoint)
+	}
+}
+
+func TestNoEndpointIsTyped(t *testing.T) {
+	t.Setenv("SYNTHIGY_ENDPOINT", "")
+	_, err := New(Config{Token: "t"})
+	var se *Error
+	if !errors.As(err, &se) || se.Code != "NO_ENDPOINT" || se.Category != "validation" || se.Retryable {
+		t.Fatalf("got %#v", err)
+	}
+}

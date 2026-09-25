@@ -9,7 +9,7 @@ import (
 
 // OnboardUser is the created/reset account's identifier — enough to address
 // it over Query/etc. Roles, groups, person_info, etc. are the caller's
-// responsibility, not onboarding's; see IDENTITY_LIFECYCLE_PLAN.md P0.
+// responsibility, not onboarding's.
 type OnboardUser struct {
 	XID string `json:"xid"`
 }

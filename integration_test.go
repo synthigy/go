@@ -42,8 +42,7 @@
 // add-client is the production path: it bcrypts the secret on write and
 // auto-creates the linked :SERVICE user that the client_credentials grant
 // resolves the principal from (token.clj). `trusted: true` enables the
-// acting_as trusted-param cascade. Persistence (EYWA_OAUTH_PERSISTENCE) keeps
-// the client across server restarts.
+// acting_as trusted-param cascade.
 package synthigy
 
 import (
@@ -515,7 +514,7 @@ func ownerGroup(ctx context.Context, t *testing.T, c *Client) string {
 }
 
 // TestLiveOnboardMintAndReset proves Onboard against a real scoped provisioner:
-// onboarding no longer creates accounts (PLAN-ONBOARDING.md P1), so this
+// onboarding does not create accounts, so this
 // creates one over Sync first — stamped into the client's own owner group —
 // mints a ticket for its xid, then resets and re-mints, proving reset doesn't
 // error and doesn't touch active.

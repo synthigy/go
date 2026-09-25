@@ -3,7 +3,7 @@ package synthigy
 // Contract test for the supervised-stdio token source — builds and spawns
 // the SDK's OWN process (testdata/supervisedharness, using only the public
 // New/Client.Token/Client.Search surface) under a stub parent speaking
-// auth.token, per docs/plans/PLAN-EXEC-IDENTITY.md steps 3-4. The harness
+// auth.token. The harness
 // prints its result to STDERR as one JSON line, keeping stdout exclusively
 // the auth.token protocol channel this test drives.
 

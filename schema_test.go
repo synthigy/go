@@ -3,6 +3,7 @@ package synthigy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -83,6 +84,68 @@ func TestLintEmptyDiagnosticsIsNonNilSlice(t *testing.T) {
 	}
 	if diags == nil || len(diags) != 0 {
 		t.Fatalf("expected empty non-nil slice, got %v", diags)
+	}
+}
+
+func TestCompileReturnsWireOp(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/compile" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{
+				"ok": true,
+				"operation": map[string]any{
+					"op": "search", "entity": "movie",
+					"args":       map[string]any{"_limit": 2},
+					"selections": map[string]any{"title": nil},
+				},
+			}},
+		})
+	}))
+	op, err := c.Compile(context.Background(), "movie (limit ?n:int=5)\n  title\n",
+		map[string]any{"n": 2})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if op["op"] != "search" || op["entity"] != "movie" {
+		t.Fatalf("bad wire op: %+v", op)
+	}
+	ops, _ := gotBody["operations"].([]any)
+	if len(ops) != 1 {
+		t.Fatalf("expected one operation in the body, got %v", gotBody)
+	}
+	sent, _ := ops[0].(map[string]any)
+	if sent["op"] != "xsql" {
+		t.Errorf("compile must send the xsql DOCUMENT op, got %v", sent["op"])
+	}
+	if doc, _ := sent["xsql"].(string); !strings.HasPrefix(doc, "@search _q\n") {
+		t.Errorf("xsql = %q, want @search _q header", doc)
+	}
+}
+
+func TestCompileSurfacesPerOpError(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{
+				"ok": false,
+				"error": map[string]any{
+					"message": "XSQL parse error: unexpected character",
+					"code":    "XSQL_PARSE_ERROR",
+				},
+			}},
+		})
+	}))
+	_, err := c.Compile(context.Background(), "movie (\n", nil)
+	if err == nil {
+		t.Fatal("expected an error for a failed compile")
+	}
+	var se *Error
+	if !errors.As(err, &se) || se.Code != "XSQL_PARSE_ERROR" {
+		t.Fatalf("want XSQL_PARSE_ERROR, got %v", err)
 	}
 }
 

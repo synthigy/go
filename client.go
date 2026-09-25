@@ -13,7 +13,7 @@ import (
 )
 
 // Config configures a Client. Provide either Token (static bearer token) or
-// ClientID+ClientSecret (OAuth client-credentials). Endpoint is required.
+// ClientID+ClientSecret (OAuth client-credentials). Endpoint defaults to $SYNTHIGY_ENDPOINT.
 type Config struct {
 	// Endpoint is the Synthigy base URL (e.g. https://synthigy.example.com).
 	Endpoint string
@@ -38,7 +38,7 @@ type Config struct {
 	// With none of the above, New also falls back to — when
 	// SYNTHIGY_SUPERVISED=1 — a supervised-stdio auth.token ask (the pipe
 	// beats the env var: it can refresh mid-run), then the SYNTHIGY_TOKEN
-	// env var (docs/plans/PLAN-EXEC-IDENTITY.md step 3); with no source at
+	// env var; with no source at
 	// all it returns a *Error{Code: "NO_TOKEN"} whose message teaches the
 	// fix.
 
@@ -64,6 +64,10 @@ type Config struct {
 	// KeepAlive pins the upstream SSE session open across watch churn (for
 	// long-lived BFFs / services). Eagerly opens the watch multiplexer.
 	KeepAlive bool
+
+	// LoginStore holds in-flight browser logins for LoginStart/LoginComplete.
+	// Nil makes them fail with NO_LOGIN_STORE.
+	LoginStore LoginStore
 }
 
 // Client is a Synthigy /data client. Construct one with New. It is safe for
@@ -81,6 +85,9 @@ type Client struct {
 	tokenSource tokenSource // nil in static-token mode
 	staticToken string
 	clientID    string
+	// kept outside the auth switch: a static-token client can still be confidential for login
+	clientSecret string
+	loginStore   LoginStore
 
 	// Local mirror of the session's subscription set (records-only
 	// set-replace contract). Guarded by subMu.
@@ -97,7 +104,10 @@ type Client struct {
 
 func newClient(cfg Config) (*Client, error) {
 	if cfg.Endpoint == "" {
-		return nil, newError("endpoint is required", "INVALID_BODY")
+		cfg.Endpoint = os.Getenv("SYNTHIGY_ENDPOINT")
+	}
+	if cfg.Endpoint == "" {
+		return nil, newError("no endpoint — set Config.Endpoint, or SYNTHIGY_ENDPOINT (run under `synthigy exec`)", "NO_ENDPOINT")
 	}
 	endpoint := strings.TrimRight(cfg.Endpoint, "/")
 	// This SDK is the client for the platform API, so that is what it mints
@@ -127,6 +137,8 @@ func newClient(cfg Config) (*Client, error) {
 		keepAlive:        cfg.KeepAlive,
 		httpClient:       hc,
 		clientID:         cfg.ClientID,
+		clientSecret:     cfg.ClientSecret,
+		loginStore:       cfg.LoginStore,
 		dataSubs:         map[string]descriptor{},
 		entitySubs:       map[string]struct{}{},
 		relationSubs:     map[string]struct{}{},

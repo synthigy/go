@@ -3,7 +3,68 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
-## 0.1.0 — unreleased
+## 0.2.0
+
+### Added
+- **Bulk writes: `SyncMany` / `StackMany`** (Client and package level) send
+  every record in ONE operation and return a `WriteResult{Count, Records}`
+  (`Records` only with `Returning()`). `OpSync`/`OpStack` take one record or
+  a slice. `synthigy-gen` emits typed `SyncMany`/`StackMany` per entity. A
+  Go bulk import used to be one operation per record.
+- **Browser login: `LoginStart` / `LoginComplete` / `LoginCancel`** (Client
+  and package level) — OIDC authorization code + PKCE for a confidential
+  client, same contract as the JS and Python SDKs. In-flight logins live in
+  `Config.LoginStore` (`NewMemoryLoginStore` for one process); the user's
+  `XID` comes from the id_token. `ClientSecret` is now kept even alongside a
+  static `Token`, since the code exchange needs it.
+- **`synthigy-gen` generates `@batch`** as `gen.API.<Batch>(ctx, params)`:
+  every member in ONE request, and a struct with a typed result field and an
+  `Err` field per member, so a failed member leaves the others intact. It used
+  to be dropped without a word.
+- **`OpQuery`, `ResultAs`, `ResultOneAs`** — build an XSQL read for `Exec`,
+  and decode one `Exec` result into typed rows (or its `*Error`).
+- **`Config.Endpoint` defaults to `SYNTHIGY_ENDPOINT`.** Under
+  `synthigy exec` that and the identity are already set, so
+  `synthigy.Connect(synthigy.Config{})` is the whole setup. No endpoint
+  anywhere is `NO_ENDPOINT` (category `validation`, not retryable); it was
+  `INVALID_BODY`.
+- **`Compile`** — `Client.Compile` / the package-level mirror post an XSQL
+  source to `POST /compile` and return the wire `Op` the engine would execute,
+  without executing it. The compiler is the authority on the wire format, so
+  this is how you take programmatic control of a query instead of hand-writing
+  the map: edit what comes back and pass it to `Exec`. `params` bind exactly as
+  on `Query`, so the result IS what the engine receives.
+
+### Changed
+- **`synthigy-gen` no longer falls back to `http://localhost:7887`.** With no
+  endpoint passed and no `SYNTHIGY_ENDPOINT`, a run that needs the server
+  fails with `NO_ENDPOINT`, as the client does; offline runs from a current
+  `ops.ir.json` are unaffected.
+- **`synthigy-gen`:** each `.xsql` file is sent to `describe` separately (`sources: [{path,
+  source}]`) instead of one concatenated text. Concatenation leaked the
+  first file's buffer-level `@namespace` into every later file and dropped
+  the others'. Needs an engine with per-file `describe`. A `(namespace,
+  name)` declared twice across files now fails with `DUPLICATE_OPERATION`,
+  naming both files; a `@batch` naming an op from another file fails with
+  `BATCH_MEMBER_UNRESOLVED`. Both are `validation` in the error table.
+  New `OpDescribeFiles` builds that request. A failed `describe` now shows
+  the server's message; it used to say "describe returned no IR".
+
+### Fixed
+- **`synthigy-gen` skips `@sync` / `@stack` / `@delete` operations** with a
+  `skipped …` line naming the schema-derived write to call instead, as the
+  other four SDKs' generators do. It used to exit on "unknown op kind".
+- **Package-level `Onboard` / `OnboardComplete`.** They were the only `Client`
+  methods with no mirror, so `synthigy.Connect` users had to reach for
+  `Default()`.
+- **`synthigy-gen` no longer generates from a stale IR.** After a `.xsql` edit
+  it warned and emitted the old operations; it now refreshes the IR from the
+  server, and fails naming the edit when it cannot reach one — the same as the
+  other SDKs' generators. `-check` is unchanged.
+- **`-xsql` defaults to `./xsql`**, the directory every example uses (was
+  `./synthigy`).
+
+## 0.1.0
 
 ### Added
 - **`Deploy` and `Destroy`** — `Client.Deploy` / `Client.Destroy`, the

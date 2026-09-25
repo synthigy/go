@@ -131,8 +131,7 @@ func (tm *tokenManager) clear() {
 }
 
 // ============================================================================
-// Supervised stdio — SYNTHIGY_SUPERVISED=1, see docs/plans/PLAN-EXEC-IDENTITY.md
-// steps 2-4. The SDK never mints locally under this mode: the CLI/commander
+// Supervised stdio — SYNTHIGY_SUPERVISED=1. The SDK never mints locally under this mode: the CLI/commander
 // is the platform's stdio owner, so a token is asked for over JSON-RPC on
 // the process's OWN stdio (supervise grammar) instead. {token, expires_in}
 // is deliberately byte-compatible with robotics' request-access-token
@@ -250,8 +249,8 @@ func (s *supervisedIO) handleLine(line string) {
 	}
 }
 
-// writeFrame is an atomic single write of frame+"\n" (PLAN-EXEC-IDENTITY
-// step 3's frame rule). A broken pipe (parent already gone) surfaces as a
+// writeFrame is an atomic single write of frame+"\n" (the frame
+// rule). A broken pipe (parent already gone) surfaces as a
 // plain error from Write — Go never raises SIGPIPE into the process for
 // stdout — so the caller falls through to the timeout path uniformly.
 func (s *supervisedIO) writeFrame(frame supervisedFrame) bool {
@@ -392,7 +391,7 @@ func (supervisedTokenSource) clear() {
 	globalSupervisedIO.clear()
 }
 
-// noTokenError is the teaching throw — PLAN-EXEC-IDENTITY step 3: the
+// noTokenError is the teaching throw: the
 // error IS the UX, no flag, no silent anonymous fallback.
 func noTokenError() *Error {
 	return newError(

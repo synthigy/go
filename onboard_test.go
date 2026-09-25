@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -148,5 +150,28 @@ func TestOnboardCompleteWrongClientMapsToError(t *testing.T) {
 	}
 	if se.Code != "CLAIM_INVALID" || se.Category != "auth" || se.Status != 400 {
 		t.Errorf("bad error: %+v", se)
+	}
+}
+
+func TestOnboardPackageLevelMirrors(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"xid": "u"}, "active": true})
+	}))
+	defer srv.Close()
+	Disconnect()
+	defer Disconnect()
+	if err := Connect(Config{Endpoint: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := Onboard(context.Background(), "u"); err != nil || out.User.XID != "u" {
+		t.Fatalf("Onboard = %+v, %v", out, err)
+	}
+	if out, err := OnboardComplete(context.Background(), "ticket"); err != nil || !out.Active {
+		t.Fatalf("OnboardComplete = %+v, %v", out, err)
+	}
+	if strings.Join(paths, ",") != "/oauth/onboard,/oauth/onboard/complete" {
+		t.Fatalf("paths = %v", paths)
 	}
 }

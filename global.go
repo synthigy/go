@@ -119,6 +119,22 @@ func Sync(ctx context.Context, entity string, data map[string]any, opts ...Opt) 
 	return c.Sync(ctx, entity, data, opts...)
 }
 
+func SyncMany(ctx context.Context, entity string, records []map[string]any, opts ...Opt) (WriteResult, error) {
+	c, err := dflt()
+	if err != nil {
+		return WriteResult{}, err
+	}
+	return c.SyncMany(ctx, entity, records, opts...)
+}
+
+func StackMany(ctx context.Context, entity string, records []map[string]any, opts ...Opt) (WriteResult, error) {
+	c, err := dflt()
+	if err != nil {
+		return WriteResult{}, err
+	}
+	return c.StackMany(ctx, entity, records, opts...)
+}
+
 func Stack(ctx context.Context, entity string, data map[string]any, opts ...Opt) (Record, error) {
 	c, err := dflt()
 	if err != nil {
@@ -233,6 +249,14 @@ func Lint(ctx context.Context, source string, opts ...Opt) ([]Diagnostic, error)
 		return nil, err
 	}
 	return c.Lint(ctx, source, opts...)
+}
+
+func Compile(ctx context.Context, xsql string, params map[string]any, opts ...Opt) (Op, error) {
+	c, err := dflt()
+	if err != nil {
+		return nil, err
+	}
+	return c.Compile(ctx, xsql, params, opts...)
 }
 
 func DeployedModel(ctx context.Context, opts ...Opt) (json.RawMessage, error) {
@@ -394,4 +418,48 @@ func Subscriptions(ctx context.Context) (map[string]any, error) {
 		return nil, err
 	}
 	return c.Subscriptions(ctx)
+}
+
+func Onboard(ctx context.Context, xid string, opts ...Opt) (*OnboardResult, error) {
+	c, err := dflt()
+	if err != nil {
+		return nil, err
+	}
+	return c.Onboard(ctx, xid, opts...)
+}
+
+func OnboardComplete(ctx context.Context, ticket string, opts ...Opt) (*OnboardCompleteResult, error) {
+	c, err := dflt()
+	if err != nil {
+		return nil, err
+	}
+	return c.OnboardComplete(ctx, ticket, opts...)
+}
+
+// ---------------------------------------------------------------------------
+// Browser login
+// ---------------------------------------------------------------------------
+
+func LoginStart(ctx context.Context, o LoginStartOptions) (string, error) {
+	c, err := dflt()
+	if err != nil {
+		return "", err
+	}
+	return c.LoginStart(ctx, o)
+}
+
+func LoginComplete(ctx context.Context, code, state, redirectURI string) (*LoginResult, error) {
+	c, err := dflt()
+	if err != nil {
+		return nil, err
+	}
+	return c.LoginComplete(ctx, code, state, redirectURI)
+}
+
+func LoginCancel(ctx context.Context, state string) (string, bool, error) {
+	c, err := dflt()
+	if err != nil {
+		return "", false, err
+	}
+	return c.LoginCancel(ctx, state)
 }

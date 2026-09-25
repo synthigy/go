@@ -112,6 +112,9 @@ func TestGenerateProducesValidGo(t *testing.T) {
 		"func (MusicAlbumNS) List(", // typed read method for the list op
 		"func (MusicAlbumNS) Sync(", // schema-derived write verb
 		"func (MusicAlbumNS) Delete(",
+		"func (MusicAlbumNS) SyncMany(ctx context.Context, data []MusicAlbumWrite",
+		"func (MusicAlbumNS) StackMany(",
+		"func toMaps[T any]",
 		"var API APISurface", // single-client surface
 	}
 	for _, w := range wants {
@@ -208,14 +211,34 @@ func TestGenerateBatchOp(t *testing.T) {
 	S := &schema{Entities: map[string]entity{
 		"movie": {Name: "Movie", Attributes: map[string]attr{"title": {Type: "string"}}},
 	}}
+	nn := false
 	I := &ir{Operations: []op{
-		{Name: "list", Op: "search", Entity: "movie",
+		{Name: "list", Op: "search", Entity: "movie", Source: "movie\n  title",
+			Params: []param{{Name: "limit", Type: "int", Optional: true}},
 			Result: result{Kind: "list", Fields: []field{{Key: "title", Type: "string"}}}},
-		{Name: "overview", Batch: true}, // batch ops are skipped in the op loop but must not crash
+		{Name: "detail", Op: "get", Entity: "movie", Source: "movie (xid = ?xid:string)\n  title",
+			Params: []param{{Name: "xid", Type: "string"}},
+			Result: result{Kind: "one", Fields: []field{{Key: "title", Type: "string"}}}},
+		{Name: "stats", Op: "sql-template", Namespace: "dashboard", Source: "SELECT count(*) AS n FROM {movie}",
+			Result: result{Kind: "list", Fields: []field{{Key: "n", Type: "int", Nullable: &nn}}}},
+		{Name: "overview", Batch: true, Members: []string{"movie/list", "detail", "dashboard/stats"}},
 	}}
 	src := generate("gen", I, S)
 	if _, err := parser.ParseFile(token.NewFileSet(), "g.go", src, parser.AllErrors); err != nil {
-		t.Fatalf("batch-containing IR must still parse: %v\n---\n%s", err, src)
+		t.Fatalf("generated batch does not parse: %v\n---\n%s", err, src)
+	}
+	flat := strings.Join(strings.Fields(src), " ")
+	for _, w := range []string{
+		"func (APISurface) Overview(ctx context.Context, params OverviewBatchParams, opts ...synthigy.Opt) (*OverviewBatch, error)",
+		"List []MovieList ListErr error",
+		"Detail *MovieDetail DetailErr error",
+		"synthigy.ResultOneAs[MovieDetail](rs[1])",
+		"synthigy.OpSQLTemplate(`SELECT count(*) AS n FROM {movie}`, p)",
+		"type OverviewBatchParams struct { Limit *int64 `json:\"limit,omitempty\"` Xid string", // xid required in detail → not a pointer
+	} {
+		if !strings.Contains(flat, w) {
+			t.Errorf("generated batch missing %q\n---\n%s", w, src)
+		}
 	}
 }
 
@@ -276,5 +299,55 @@ func TestSourcesDrifted(t *testing.T) {
 	}
 	if drifted, _ := sourcesDrifted(dir, ir); drifted {
 		t.Error("missing IR should not report drift")
+	}
+}
+
+func TestReadXSQLRecursesSortedAndMerges(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{"b/z.xsql": "@workspace w2\nZ", "a.xsql": "@workspace w1\nA", "b.xsql": "B"}
+	for rel, body := range files {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src, err := readXSQL(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "@workspace w1\nA\n\nB\n\nZ"; src != want {
+		t.Errorf("got %q, want %q", src, want)
+	}
+}
+
+// A @sync/@stack/@delete in the .xsql would exit "unknown op kind"; writes come
+// from the schema, so codegen skips them like the other four SDKs do.
+func TestGenerateSkipsMutationOps(t *testing.T) {
+	S := &schema{Entities: map[string]entity{
+		"movie": {Name: "Movie", Attributes: map[string]attr{"title": {Type: "string"}}},
+	}}
+	I := &ir{Operations: []op{
+		{Name: "list", Op: "search", Entity: "movie", Source: "movie\n  title",
+			Result: result{Kind: "list", Fields: []field{{Key: "title", Type: "string"}}}},
+		{Name: "save", Op: "sync", Entity: "movie", Source: "@sync save\nmovie"},
+		{Name: "add", Op: "stack", Entity: "movie", Source: "@stack add\nmovie"},
+		{Name: "drop", Op: "delete", Entity: "movie", Source: "@delete drop\nmovie"},
+	}}
+	src := generate("gen", I, S)
+	if _, err := parser.ParseFile(token.NewFileSet(), "g.go", src, parser.AllErrors); err != nil {
+		t.Fatalf("does not parse: %v\n---\n%s", err, src)
+	}
+	for _, w := range []string{"func (MovieNS) List(", "func (MovieNS) Sync(", "func (MovieNS) Stack("} {
+		if !strings.Contains(src, w) {
+			t.Errorf("missing %q", w)
+		}
+	}
+	for _, bad := range []string{"MovieSave", "MovieAdd", "MovieDrop"} {
+		if strings.Contains(src, bad) {
+			t.Errorf("mutation op emitted: %q", bad)
+		}
 	}
 }

@@ -10,7 +10,7 @@ type callOptions struct {
 	actingAs    string
 	keyFormat   string
 	audience    string
-	returning   bool // sync/stack: echo the written records
+	returning   bool   // sync/stack: echo the written records
 	op          string // XSQL Query wire op (default "search")
 	entity      string // override root entity (Query)
 	raw         bool   // tree ops: return flat array instead of composing
