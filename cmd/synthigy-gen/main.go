@@ -176,7 +176,11 @@ func main() {
 	}
 
 	// Pull when asked, when the IR is stale, or when a snapshot is missing (first run).
-	if *pull || stale || !exists(schemaPath) || !exists(irPath) {
+	pulling := *pull || stale || !exists(schemaPath) || !exists(irPath)
+	if !pulling {
+		warnStaleSchema(os.Stderr, *endpoint, schemaPath)
+	}
+	if pulling {
 		if err := doPull(*endpoint, *xsqlDir, schemaPath, irPath); err != nil {
 			fmt.Fprintf(os.Stderr, "pull failed: %v\n", err)
 			if stale {

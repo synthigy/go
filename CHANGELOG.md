@@ -3,6 +3,31 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.1
+
+### Fixed
+- **A login may take 10 minutes, not 5** (`NewMemoryLoginStore(0)`).
+  Synthigy's login page allows 8, so a user who took 5–8 minutes logged in
+  there and then failed the callback with `LOGIN_STATE_UNKNOWN`.
+- **`LoginComplete` and `LoginCancel` refuse a login older than 10 minutes
+  themselves.** Expiry used to live only in the store, so a custom store that
+  never expired accepted a login of any age.
+- **Permission denials are `iam`, not retryable `internal`.**
+  `RELATION_FORBIDDEN`, `ATTRIBUTE_FORBIDDEN`, `ROW_FORBIDDEN`,
+  `CREATE_FORBIDDEN`, `DELETE_FORBIDDEN` and `SLOT_OCCUPIED` were missing from
+  the code table, so a denied relation read came back as a retryable server
+  error.
+- **A code the SDK doesn't know is no longer retryable.** It stays category
+  `internal`, but `Retryable` is true only when the server marks the error
+  retryable (it does for transient database failures) or the code is a known
+  `network`/`rate_limit`/`internal` one.
+- **A refused token mint says why.** `invalid_client` → `INVALID_CLIENT` (with
+  a `Hint` to check the client id and secret), `invalid_scope` →
+  `INVALID_SCOPE`, `invalid_target` → `INVALID_AUDIENCE`; other refusals stay
+  `UNAUTHORIZED`. `Message` carries the server's `error_description`,
+  `Details` the decoded OAuth error, `Status` the HTTP status (it was unset). A
+  wrong secret used to read the same as an expired session.
+
 ## 0.2.0
 
 ### Added

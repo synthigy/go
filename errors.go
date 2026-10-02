@@ -7,8 +7,8 @@ import (
 )
 
 // errorCategories maps a stable error code to its category. Codes not in the
-// table fall back to "internal". Categories are stable enums consumers can
-// branch on:
+// table fall back to "internal", retryable only when the server marks the
+// error retryable. Categories are stable enums consumers can branch on:
 //
 //   - auth        — token / session / IdP issues. Re-authenticate.
 //   - iam         — RBAC/RLS denial. Caller lacks permission.
@@ -32,6 +32,9 @@ var errorCategories = map[string]string{
 	"NO_LOGIN_STORE":          "auth",
 	"LOGIN_NONCE_MISMATCH":    "auth",
 	"LOGIN_EXCHANGE_FAILED":   "auth",
+	"INVALID_CLIENT":          "auth",
+	"INVALID_SCOPE":           "auth",
+	"INVALID_AUDIENCE":        "auth",
 	"NO_TOKEN":                "auth",       // client-side: no token source configured — retrying can't fix it
 	"NO_ENDPOINT":             "validation", // client-side: no endpoint configured — retrying can't fix it
 	// iam
@@ -40,6 +43,12 @@ var errorCategories = map[string]string{
 	"ENTITY_FORBIDDEN":      "iam",
 	"ENTITY_NOT_READABLE":   "iam",
 	"RELATION_NOT_READABLE": "iam",
+	"RELATION_FORBIDDEN":    "iam",
+	"ATTRIBUTE_FORBIDDEN":   "iam",
+	"ROW_FORBIDDEN":         "iam",
+	"CREATE_FORBIDDEN":      "iam",
+	"DELETE_FORBIDDEN":      "iam",
+	"SLOT_OCCUPIED":         "iam",
 	// validation
 	"INVALID_BODY":                       "validation",
 	"NO_OPERATIONS":                      "validation",
@@ -151,15 +160,15 @@ func (e *Error) Error() string {
 
 // newError builds an Error, deriving category and retryability from the code.
 func newError(message, code string) *Error {
-	cat := errorCategories[code]
-	if cat == "" {
+	cat, known := errorCategories[code]
+	if !known {
 		cat = "internal"
 	}
 	return &Error{
 		Message:   message,
 		Code:      code,
 		Category:  cat,
-		Retryable: retryableCategories[cat],
+		Retryable: known && retryableCategories[cat],
 	}
 }
 
@@ -180,6 +189,7 @@ type serverError struct {
 	Start       *Pos     `json:"start"`
 	End         *Pos     `json:"end"`
 	Diagnostics []any    `json:"diagnostics"`
+	Retryable   *bool    `json:"retryable"`
 }
 
 // errorFromServer builds an Error from a server-returned error object, the
@@ -203,6 +213,9 @@ func errorFromServer(se *serverError, status int, requestID string) *Error {
 	e.Diagnostics = se.Diagnostics
 	e.RequestID = requestID
 	e.Status = status
+	if se.Retryable != nil {
+		e.Retryable = *se.Retryable
+	}
 	return e
 }
 

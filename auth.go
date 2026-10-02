@@ -102,9 +102,7 @@ func (tm *tokenManager) getToken(ctx context.Context, audience string) (string, 
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", newError(
-			fmt.Sprintf("Token request failed (%d): %s", resp.StatusCode, string(body)),
-			"UNAUTHORIZED")
+		return "", tokenRefusal(resp.StatusCode, body)
 	}
 
 	var tr tokenResponse
@@ -120,6 +118,40 @@ func (tm *tokenManager) getToken(ctx context.Context, audience string) (string, 
 		expiresAt: time.Now().Add(time.Duration(expiresIn) * time.Second),
 	}
 	return tr.AccessToken, nil
+}
+
+// refusalCodes are the RFC 6749 §5.2 / RFC 8707 refusals with their own
+// code; any other refusal is UNAUTHORIZED.
+var refusalCodes = map[string]string{
+	"invalid_client": "INVALID_CLIENT",
+	"invalid_scope":  "INVALID_SCOPE",
+	"invalid_target": "INVALID_AUDIENCE",
+}
+
+func tokenRefusal(status int, body []byte) *Error {
+	var oauth map[string]any
+	_ = json.Unmarshal(body, &oauth)
+	refusal, _ := oauth["error"].(string)
+	if refusal == "" {
+		e := newError(fmt.Sprintf("Token request failed (%d): %s", status, string(body)), "UNAUTHORIZED")
+		e.Status = status
+		return e
+	}
+	msg := fmt.Sprintf("Token request refused (%d): %s", status, refusal)
+	if desc, _ := oauth["error_description"].(string); desc != "" {
+		msg += " — " + desc
+	}
+	code, ok := refusalCodes[refusal]
+	if !ok {
+		code = "UNAUTHORIZED"
+	}
+	e := newError(msg, code)
+	e.Status = status
+	e.Details = oauth
+	if code == "INVALID_CLIENT" {
+		e.Hint = "check the client id and secret, and that the client is active"
+	}
+	return e
 }
 
 // clear drops all cached tokens — used after a 401 so the next request

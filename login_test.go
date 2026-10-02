@@ -229,4 +229,43 @@ func TestLoginCancelAndTTL(t *testing.T) {
 	if p, _ := s.Take(ctx, "s"); p != nil {
 		t.Fatal("expired login returned")
 	}
+	d := NewMemoryLoginStore(0)
+	_ = d.Put(ctx, "slow", PendingLogin{CreatedAt: time.Now().Add(-9 * time.Minute)})
+	if p, _ := d.Take(ctx, "slow"); p == nil {
+		t.Fatal("a 9-minute login must survive the server's 8-minute window")
+	}
+}
+
+// foreverStore never expires anything, like a hand-rolled store that forgot to.
+type foreverStore struct{ pending map[string]PendingLogin }
+
+func (s *foreverStore) Put(_ context.Context, state string, l PendingLogin) error {
+	s.pending[state] = l
+	return nil
+}
+
+func (s *foreverStore) Take(_ context.Context, state string) (*PendingLogin, error) {
+	l, ok := s.pending[state]
+	if !ok {
+		return nil, nil
+	}
+	delete(s.pending, state)
+	return &l, nil
+}
+
+func TestExpiredLoginRefusedEvenWhenStoreKeptIt(t *testing.T) {
+	ctx := context.Background()
+	srv, calls := tokenServer(t, func(url.Values) (int, any) { return 200, map[string]any{} })
+	old := PendingLogin{CodeVerifier: "v", Nonce: "n", ReturnTo: "/back", CreatedAt: time.Now().Add(-loginTTL - time.Second)}
+	store := &foreverStore{pending: map[string]PendingLogin{"done": old, "cancelled": old}}
+	c := loginClient(t, srv.URL, store)
+	if _, err := c.LoginComplete(ctx, "the-code", "done", "http://app/cb"); codeOf(err) != "LOGIN_STATE_UNKNOWN" {
+		t.Fatalf("want LOGIN_STATE_UNKNOWN, got %v", err)
+	}
+	if _, ok, err := c.LoginCancel(ctx, "cancelled"); ok || err != nil {
+		t.Fatalf("cancel of an expired login = %v %v", ok, err)
+	}
+	if len(*calls) != 0 {
+		t.Fatal("an expired login must not reach the IdP")
+	}
 }

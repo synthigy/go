@@ -160,7 +160,10 @@ repo.
 
 - **Client credentials**: set `ClientID` + `ClientSecret`. Tokens are fetched
   from `/oauth/token`, cached per audience, refreshed before expiry, and
-  re-fetched automatically once on a `401`.
+  re-fetched automatically once on a `401`. A refused mint is
+  `INVALID_CLIENT` (wrong id or secret, inactive client), `INVALID_SCOPE`, or
+  `INVALID_AUDIENCE` (the client isn't linked to the API), else
+  `UNAUTHORIZED`; `.Message` carries the server's `error_description`.
 - **`Audience`** (or `$SYNTHIGY_AUDIENCE`): binds one audience to every mint
   this client makes. The platform's audience model is **opt-in by design** — a
   token minted naming no audience resolves to an identity-only audience that
@@ -233,7 +236,9 @@ http.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
 All network methods take a `context.Context` first and return `(result, error)`.
 Errors are `*synthigy.Error` (use `errors.As`); inspect `.Code`, `.Category`
 (`auth`/`iam`/`validation`/`not_found`/`conflict`/`rate_limit`/`network`/`internal`),
-and `.Retryable`.
+and `.Retryable` — true for `network`, `rate_limit` and `internal` codes and for
+errors the server marks retryable. A code this SDK doesn't know yet is
+`internal` but not retryable.
 
 | Method | Purpose |
 |---|---|

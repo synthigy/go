@@ -31,6 +31,11 @@ type LoginStore interface {
 	Take(ctx context.Context, state string) (*PendingLogin, error)
 }
 
+// loginTTL is how long a login may take from LoginStart to the callback;
+// LoginComplete refuses older ones whatever the store keeps. Must exceed the
+// server's 8-minute login window, or slow logins fail LOGIN_STATE_UNKNOWN.
+const loginTTL = 10 * time.Minute
+
 // MemoryLoginStore keeps in-flight logins in memory — SINGLE PROCESS ONLY.
 // Behind a load balancer the callback can land on an instance that never saw
 // LoginStart and fails with LOGIN_STATE_UNKNOWN.
@@ -40,10 +45,10 @@ type MemoryLoginStore struct {
 	pending map[string]PendingLogin
 }
 
-// NewMemoryLoginStore returns a MemoryLoginStore; ttl <= 0 means five minutes.
+// NewMemoryLoginStore returns a MemoryLoginStore; ttl <= 0 means ten minutes.
 func NewMemoryLoginStore(ttl time.Duration) *MemoryLoginStore {
 	if ttl <= 0 {
-		ttl = 5 * time.Minute
+		ttl = loginTTL
 	}
 	return &MemoryLoginStore{ttl: ttl, pending: map[string]PendingLogin{}}
 }
@@ -200,13 +205,9 @@ func (c *Client) LoginComplete(ctx context.Context, code, state, redirectURI str
 	if err := c.requireLogin(); err != nil {
 		return nil, err
 	}
-	var pending *PendingLogin
-	if state != "" {
-		p, err := c.loginStore.Take(ctx, state)
-		if err != nil {
-			return nil, err
-		}
-		pending = p
+	pending, err := c.takePending(ctx, state)
+	if err != nil {
+		return nil, err
 	}
 	if pending == nil {
 		return nil, newError("unknown or expired login state: the store never saw it, "+
@@ -290,12 +291,22 @@ func (c *Client) LoginCancel(ctx context.Context, state string) (returnTo string
 	if c.loginStore == nil {
 		return "", false, noLoginStoreError()
 	}
-	if state == "" {
-		return "", false, nil
-	}
-	p, err := c.loginStore.Take(ctx, state)
+	p, err := c.takePending(ctx, state)
 	if err != nil || p == nil {
 		return "", false, err
 	}
 	return p.ReturnTo, true, nil
+}
+
+// takePending takes a pending login, refusing one older than loginTTL even
+// when the store kept it.
+func (c *Client) takePending(ctx context.Context, state string) (*PendingLogin, error) {
+	if state == "" {
+		return nil, nil
+	}
+	p, err := c.loginStore.Take(ctx, state)
+	if err != nil || p == nil || time.Since(p.CreatedAt) >= loginTTL {
+		return nil, err
+	}
+	return p, nil
 }
