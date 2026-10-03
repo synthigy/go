@@ -133,6 +133,38 @@ func (c *Client) DeployedModel(ctx context.Context, opts ...Opt) (json.RawMessag
 	return r.Data, nil
 }
 
+// WhoAmI is the identity a call runs as. Client is nil in-process (no OAuth
+// client).
+type WhoAmI struct {
+	XID       string        `json:"xid"`
+	Name      string        `json:"name"`
+	Active    bool          `json:"active"`
+	Superuser bool          `json:"superuser"`
+	Roles     []string      `json:"roles"`
+	Groups    []string      `json:"groups"`
+	Client    *WhoAmIClient `json:"client"`
+}
+
+// WhoAmIClient is the token's OAuth client; Trusted means it may act as users.
+type WhoAmIClient struct {
+	ID      string `json:"id"`
+	Trusted bool   `json:"trusted"`
+}
+
+// Whoami reports who a call runs as — pass ActingAs to ask about a user —
+// with its roles, superuser flag, and whether this client may act as users.
+func (c *Client) Whoami(ctx context.Context, opts ...Opt) (WhoAmI, error) {
+	r, err := c.execOne(ctx, OpWhoami(), opts...)
+	if err != nil {
+		return WhoAmI{}, err
+	}
+	var me WhoAmI
+	if err := json.Unmarshal(r.Data, &me); err != nil {
+		return WhoAmI{}, newError("failed to decode whoami result: "+err.Error(), "INTERNAL_ERROR")
+	}
+	return me, nil
+}
+
 // DeployAck is what Deploy acks with — Dataset is the xid Destroy takes.
 type DeployAck struct {
 	Deployed bool   `json:"deployed"`

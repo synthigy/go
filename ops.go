@@ -82,6 +82,9 @@ func OpQuery(xsql string, params map[string]any, verb string) Op {
 func OpDeployedModel() Op { return Op{"op": "deployed-model"} }
 func OpRuntimeModel() Op  { return Op{"op": "runtime-model"} }
 
+// OpWhoami asks who the request runs as (see Client.Whoami).
+func OpWhoami() Op { return Op{"op": "whoami"} }
+
 // OpDeploy deploys a dataset version from a modeler export — pass the
 // export file's contents verbatim, the server decodes it.
 func OpDeploy(exportContents string) Op { return Op{"op": "deploy", "data": exportContents} }

@@ -56,7 +56,7 @@ package synthigy
 // every caller configures.
 const PlatformAudience = "https://synthigy.com"
 
-const Version = "0.2.1"
+const Version = "0.2.2"
 
 // Record is a single entity record as returned by the /data endpoint —
 // a dynamic attribute map keyed by attribute name (in the requested key

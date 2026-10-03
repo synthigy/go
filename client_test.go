@@ -33,6 +33,31 @@ func writeResults(w http.ResponseWriter, results []map[string]any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
 }
 
+func TestWhoami(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeResults(w, []map[string]any{{"ok": true, "data": map[string]any{
+			"xid": "x-bgates", "name": "bgates", "active": true, "superuser": false,
+			"roles": []string{"Viewer"}, "groups": []string{},
+			"client": map[string]any{"id": "viewer", "trusted": true}}}})
+	}))
+	me, err := c.Whoami(context.Background(), ActingAs("x-bgates"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if me.XID != "x-bgates" || me.Superuser || len(me.Roles) != 1 || me.Roles[0] != "Viewer" ||
+		me.Client == nil || me.Client.ID != "viewer" || !me.Client.Trusted {
+		t.Fatalf("whoami = %+v", me)
+	}
+	if gotBody["acting_as"] != "x-bgates" {
+		t.Errorf("acting_as = %v", gotBody["acting_as"])
+	}
+	if ops, _ := gotBody["operations"].([]any); len(ops) != 1 || ops[0].(map[string]any)["op"] != "whoami" {
+		t.Errorf("operations = %v", gotBody["operations"])
+	}
+}
+
 func TestSearch(t *testing.T) {
 	var gotBody map[string]any
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

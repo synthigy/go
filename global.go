@@ -267,6 +267,15 @@ func DeployedModel(ctx context.Context, opts ...Opt) (json.RawMessage, error) {
 	return c.DeployedModel(ctx, opts...)
 }
 
+// Whoami reports who a call through the default client runs as.
+func Whoami(ctx context.Context, opts ...Opt) (WhoAmI, error) {
+	c, err := dflt()
+	if err != nil {
+		return WhoAmI{}, err
+	}
+	return c.Whoami(ctx, opts...)
+}
+
 // Deploy deploys a dataset version from a modeler export via the default
 // client. Pass the export file's contents verbatim — the server decodes it.
 func Deploy(ctx context.Context, exportContents string, opts ...Opt) (DeployAck, error) {

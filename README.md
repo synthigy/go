@@ -246,6 +246,7 @@ errors the server marks retryable. A code this SDK doesn't know yet is
 | `SQLTemplate` | ERD-aware SQL with `{entity.field}` placeholders (totals, joins, windows) |
 | `Sync` / `Stack` / `Slice` / `Delete` / `Purge` | writes (see below) |
 | `Schema` / `Lint` / `DeployedModel` / `RuntimeModel` | introspection |
+| `Whoami` | who a call runs as (`ActingAs` to ask about a user): roles, superuser, whether this client may act as users |
 | `History()` | temporal `get-at` / `events` / `diff` / `timeline` / `since` |
 | `Exec` | several operations in one request (`OpQuery`, `OpStack`, …) |
 

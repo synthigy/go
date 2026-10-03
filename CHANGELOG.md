@@ -3,6 +3,14 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.2
+
+### Added
+- **`Whoami` / `Client.Whoami(ctx, ActingAs(xid))`** (and `OpWhoami`,
+  `WhoAmI`) — who a call runs as: xid, name, active, superuser, roles
+  (group-conferred included), groups, and `Client` `{ID, Trusted}`, where
+  `Trusted` means this client may act as users. Needs engine v0.2.11 or newer.
+
 ## 0.2.1
 
 ### Fixed
