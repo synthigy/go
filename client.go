@@ -208,13 +208,39 @@ func (c *Client) Token(ctx context.Context, opts ...Opt) (string, error) {
 func (c *Client) fetchAuth(ctx context.Context, method, urlStr string, body []byte,
 	headers map[string]string, applyTimeout bool) (*http.Response, error) {
 
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	return c.fetchAuthBody(ctx, method, urlStr, rdr, headers, applyTimeout)
+}
+
+// fetchAuthBody is fetchAuth over a reader. The 401 retry rewinds a body
+// that is an io.Seeker; any other body is sent once.
+func (c *Client) fetchAuthBody(ctx context.Context, method, urlStr string, body io.Reader,
+	headers map[string]string, applyTimeout bool) (*http.Response, error) {
+
+	seeker, replayable := body.(io.Seeker)
+	replayable = replayable || body == nil
+	var start int64
+	if seeker != nil {
+		var err error
+		if start, err = seeker.Seek(0, io.SeekCurrent); err != nil {
+			replayable = false
+		}
+	}
 	resp, err := c.attempt(ctx, method, urlStr, body, headers, applyTimeout)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized && c.tokenSource != nil {
+	if resp.StatusCode == http.StatusUnauthorized && c.tokenSource != nil && replayable {
 		resp.Body.Close()
 		c.tokenSource.clear()
+		if seeker != nil {
+			if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+				return nil, newError(err.Error(), "NETWORK_ERROR")
+			}
+		}
 		resp, err = c.attempt(ctx, method, urlStr, body, headers, applyTimeout)
 		if err != nil {
 			return nil, err
@@ -231,7 +257,7 @@ func (c *Client) fetchAuth(ctx context.Context, method, urlStr string, body []by
 	return resp, nil
 }
 
-func (c *Client) attempt(ctx context.Context, method, urlStr string, body []byte,
+func (c *Client) attempt(ctx context.Context, method, urlStr string, body io.Reader,
 	headers map[string]string, applyTimeout bool) (*http.Response, error) {
 
 	tok, err := c.token(ctx, c.defaultAudience)
@@ -247,9 +273,19 @@ func (c *Client) attempt(ctx context.Context, method, urlStr string, body []byte
 		}
 	}
 
-	var rdr io.Reader
-	if body != nil {
-		rdr = bytes.NewReader(body)
+	rdr, length := body, int64(0)
+	if f, ok := body.(interface{ Stat() (os.FileInfo, error) }); ok {
+		if st, err := f.Stat(); err == nil && st.Mode().IsRegular() {
+			if s, ok := body.(io.Seeker); ok {
+				if pos, err := s.Seek(0, io.SeekCurrent); err == nil && st.Size() > pos {
+					length = st.Size() - pos
+				}
+			}
+		}
+	}
+	if _, ok := body.(io.Closer); ok {
+		// the transport closes request bodies; this one belongs to the caller
+		rdr = io.NopCloser(body)
 	}
 	req, err := http.NewRequestWithContext(reqCtx, method, urlStr, rdr)
 	if err != nil {
@@ -257,6 +293,9 @@ func (c *Client) attempt(ctx context.Context, method, urlStr string, body []byte
 			cancel()
 		}
 		return nil, newError(err.Error(), "NETWORK_ERROR")
+	}
+	if length > 0 {
+		req.ContentLength = length
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)

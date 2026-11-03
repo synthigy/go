@@ -72,7 +72,7 @@ synthigy up
 ```
 
 The first `up` prints a `/setup` link; open it and pick a database. (No
-browser? `synthigy up --db sqlite` skips the wizard.) Already have a server?
+browser? `synthigy up --bundle sqlite` skips the wizard.) Already have a server?
 Skip this step.
 
 **2. Deploy your data model** in the modeler (or from code with `synthigy.Deploy()`, as a
@@ -164,13 +164,12 @@ repo.
   `INVALID_CLIENT` (wrong id or secret, inactive client), `INVALID_SCOPE`, or
   `INVALID_AUDIENCE` (the client isn't linked to the API), else
   `UNAUTHORIZED`; `.Message` carries the server's `error_description`.
-- **`Audience`** (or `$SYNTHIGY_AUDIENCE`): binds one audience to every mint
-  this client makes. The platform's audience model is **opt-in by design** — a
-  token minted naming no audience resolves to an identity-only audience that
-  `/data` rejects, so without this every data call 401s. Set it to the server's
-  `/data` audience, published at `/.well-known/synthigy` as
-  `auth.oidc.audience`. Left unset the SDK names no audience, so an unentitled
-  client keeps a soft `401` rather than a hard `invalid_target`.
+- **`Audience`** (or `$SYNTHIGY_AUDIENCE`): leave it unset. Every mint names
+  `PlatformAudience` (`https://synthigy.com`), the audience `/data`, `/schema`,
+  `/history`, `/logs` and subscriptions require; a token naming no audience
+  would get an identity-only one that `/data` rejects. Set it only to mint for
+  a different API that trusts Synthigy as its IdP. A client not linked to the
+  platform API fails the mint with `INVALID_AUDIENCE`.
 - **Static token**: set `Token`. For an unauthenticated dev server, set
   `Token: ""` together with `StaticToken: true`.
 - With none of the above in `Config`, `New` also falls back to — when
@@ -248,6 +247,7 @@ errors the server marks retryable. A code this SDK doesn't know yet is
 | `Schema` / `Lint` / `DeployedModel` / `RuntimeModel` | introspection |
 | `Whoami` | who a call runs as (`ActingAs` to ask about a user): roles, superuser, whether this client may act as users |
 | `History()` | temporal `get-at` / `events` / `diff` / `timeline` / `since` |
+| `Files()` | upload, download, versions and folders (below) |
 | `Exec` | several operations in one request (`OpQuery`, `OpStack`, …) |
 
 **Writes are silent by default** — `Sync`/`Stack` answer `{"count": n}`, not
@@ -288,6 +288,67 @@ rows, _ := synthigy.SQLTemplate(ctx, "SELECT count(*) AS n FROM {movie}", nil)
 // rows[0]["n"] == 9742
 ```
 
+## Files
+
+`c.Files()` speaks the engine's `/files` endpoints: the bytes, their versions
+and folders, under the same access control as your data. Each file is also a
+`File` record on `/data`. A file is a path (`"/site/img/logo.png"`) or an xid;
+a folder is a path ending in `/` (`"/"` is ROOT).
+
+```go
+fs := c.Files()
+fs.Folder(ctx, "/site/img/")                          // made with every missing folder above it
+f, _ := os.Open("logo.png")
+defer f.Close()
+fi, err := fs.Put(ctx, "/site/img/logo.png", f)       // creates, or replaces (the old bytes stay a version)
+// fi.XID, fi.Size, fi.Hash (SHA-256, the download ETag), fi.UploadedBy.Name
+
+d, _ := fs.Download(ctx, "/site/img/logo.png")        // synthigy.ByteRange(0, 1023) for part of it
+defer d.Body.Close()
+io.Copy(dst, d.Body)
+
+fs.Put(ctx, fi.XID, data, synthigy.IfMatch(fi.Hash))  // FILE_CHANGED if someone was first
+fs.PutNew(ctx, "scan.pdf", data)                       // a new file in no folder, every time
+ls, _ := fs.List(ctx, synthigy.InFolder("/site/"))    // ls.Files, ls.Folders; NoFolder(); neither = every file
+hits, _ := fs.Search(ctx, "site logo")                 // paths holding the words in order, shortest first
+fs.Move(ctx, "/site/img/logo.png", "/brand/")          // keeps the name; never overwrites
+fs.Move(ctx, "/site/img/", "/assets/img/")             // a folder
+vs, _ := fs.Versions(ctx, fi.XID)                      // the last ten, newest first
+fs.Restore(ctx, fi.XID, vs[1].ID)
+fs.Share(ctx, "/site/", "read", []string{userXID}, nil)
+fs.Delete(ctx, "/site/img/logo.png")                   // or an empty folder: "/site/img/"
+```
+
+`Put` never creates folders (a missing one is `FOLDER_NOT_FOUND`); `Folder`
+does. `Put` reads the body to the end and does not close it; an `io.Seeker`
+body (a file, a `bytes.Reader`) is rewound if the token is refreshed mid-call.
+`Info` returns nil for a file you cannot see. `Move` answers the moved file or
+folder.
+
+A browser cannot send your token (`<img src>`, a link in an email). Files in a
+public folder load from a plain link, built without a request; `Serve` answers
+a browser's request from your server with your token, Range and 304 included:
+
+```go
+fs.Folder(ctx, "/site/", synthigy.SetPublic(true), synthigy.SetCache(86400))
+src := fs.URL("/site/img/logo.png")                    // or an xid; synthigy.Inline() opens it in the browser
+http.HandleFunc("/logo", func(w http.ResponseWriter, r *http.Request) {
+	fs.Serve(w, r, "/private/logo.png")
+})
+```
+
+A folder's own `Public` and `Cache` win, else the nearest folder above that
+has one (`InheritPublic()`, `InheritCache()` clear them); `Folder.Public` and
+`Folder.Cache` show what applies, `Folder.Settings` what is set on it. File
+User may set the cache but not public (`ATTRIBUTE_FORBIDDEN`).
+
+One put carries up to the server's `SYNTHIGY_SERVER_MAX_BODY` (25 MB by
+default). The engine's [files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
+covers storage, access and retention; error codes include `FILE_NOT_FOUND`,
+`FOLDER_NOT_FOUND`, `FILE_CHANGED`, `FILE_TOO_LARGE`, `VERSION_EXPIRED`,
+`INVALID_PATH`, `AUDIT_UNAVAILABLE` and `FILES_UNAVAILABLE` (no files module
+on the server).
+
 ## Filters, sorting, relations
 
 All of it is written in the query:
@@ -303,6 +364,7 @@ movie (release_year >= ?from:int, order by title asc, limit 20)
 - `?name:type=default` are named params, passed as a map.
 - `->genres` is a **left** pull — a movie with no genres is still returned.
   `-genres` is **inner**: only movies that have a genre come back.
+  `!genres` keeps only movies with none (filters allowed, no fields under it).
 - A filter on a field (`title (ilike ?q)`) filters the rows.
 
 ## Live streaming (channels)
@@ -348,7 +410,10 @@ go test -tags integration ./...    # against a live server (env-gated)
 Set `SYNTHIGY_ENDPOINT` plus `SYNTHIGY_CLIENT_ID`/`SYNTHIGY_CLIENT_SECRET` (or
 `SYNTHIGY_TOKEN`) for integration tests, and
 `SYNTHIGY_TEST_LOGIN_CLIENT_ID`/`_SECRET`/`_USER`/`_PASSWORD` for the headless
-browser-login test. Runnable services live in
+browser-login test. The live files suite (`go test -tags integration -run TestFilesLive .`)
+needs `SYNTHIGY_FILES_TEST_ENDPOINT` plus `SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET}`:
+three client-credentials clients whose service users hold File Admin, File User and
+File Reader; it skips without the endpoint. Runnable services live in
 [synthigy/examples](https://github.com/synthigy/examples): `movies/go` for the
 smallest shape, `rls-demo/go` for the access-control BFF.
 ```
@@ -356,4 +421,4 @@ smallest shape, `rls-demo/go` for the access-control BFF.
 ## License
 
 MIT — see [LICENSE](LICENSE). The SDKs are permissive client libraries; the
-Synthigy engine is fair-code under the Sustainable Use License.
+Synthigy engine is source-available under the Business Source License 1.1.

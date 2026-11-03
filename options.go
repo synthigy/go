@@ -43,6 +43,19 @@ type callOptions struct {
 	groupBy        string
 	between        []any
 	cursor         any
+
+	// files
+	folder         string
+	contentType    string
+	ifMatch        string
+	ifNoneMatch    string
+	byteRange      *[2]int64
+	version        *int64
+	fileQuery      string
+	noFolder       bool
+	offset         *int
+	inline         bool
+	folderSettings map[string]any
 }
 
 func applyOpts(opts []Opt) callOptions {
@@ -143,7 +156,7 @@ func Tenant(t any) Opt { return func(o *callOptions) { o.tenant = t } }
 // IncludeDeleted includes soft-deleted state in history.GetAt.
 func IncludeDeleted(v bool) Opt { return func(o *callOptions) { o.includeDeleted = &v } }
 
-// Limit caps the number of rows returned by a history op.
+// Limit caps the rows of a history op, Files.List or Files.Search.
 func Limit(n int) Opt { return func(o *callOptions) { o.limit = &n } }
 
 // Track selects the audit track for history events/since ("entity", etc.).
@@ -158,3 +171,66 @@ func Between(from, to any) Opt { return func(o *callOptions) { o.between = []any
 
 // Cursor sets the exclusive lower-bound timestamp for history.Since.
 func Cursor(ts any) Opt { return func(o *callOptions) { o.cursor = ts } }
+
+// InFolder narrows Files.List to one folder, or Files.Search to below it;
+// pass the folder path ("/a/b/") or xid.
+func InFolder(folder string) Opt { return func(o *callOptions) { o.folder = folder } }
+
+// ContentType sets the media type Files.Put stores; omitted, the server
+// guesses it from the name.
+func ContentType(t string) Opt { return func(o *callOptions) { o.contentType = t } }
+
+// IfMatch makes Files.Put refuse with FILE_CHANGED unless the stored hash is
+// still this one.
+func IfMatch(hash string) Opt { return func(o *callOptions) { o.ifMatch = hash } }
+
+// IfNoneMatch makes Files.Download answer NotModified, without bytes, while
+// the stored hash is still this one.
+func IfNoneMatch(hash string) Opt { return func(o *callOptions) { o.ifNoneMatch = hash } }
+
+// ByteRange downloads bytes start..end, inclusive. A negative end reads to
+// the end; a negative start with end n reads the last n bytes.
+func ByteRange(start, end int64) Opt {
+	return func(o *callOptions) { o.byteRange = &[2]int64{start, end} }
+}
+
+// AtVersion downloads a kept version (FileVersion.ID) instead of the current
+// bytes.
+func AtVersion(id int64) Opt { return func(o *callOptions) { o.version = &id } }
+
+// Matching narrows Files.List to names holding these words in order, any
+// case; a space stands for anything between, % and _ are plain.
+func Matching(q string) Opt { return func(o *callOptions) { o.fileQuery = q } }
+
+// NoFolder narrows Files.List to files in no folder.
+func NoFolder() Opt { return func(o *callOptions) { o.noFolder = true } }
+
+// Offset skips the first n results of Files.List or Files.Search.
+func Offset(n int) Opt { return func(o *callOptions) { o.offset = &n } }
+
+// Inline makes a Files.URL or Files.Serve answer open in the browser instead
+// of downloading.
+func Inline() Opt { return func(o *callOptions) { o.inline = true } }
+
+func folderSetting(key string, v any) Opt {
+	return func(o *callOptions) {
+		if o.folderSettings == nil {
+			o.folderSettings = map[string]any{}
+		}
+		o.folderSettings[key] = v
+	}
+}
+
+// SetPublic sets a folder's own Public in Files.Folder: files there, and in
+// folders below without their own value, load without a token.
+func SetPublic(v bool) Opt { return folderSetting("public", v) }
+
+// InheritPublic clears a folder's own Public in Files.Folder.
+func InheritPublic() Opt { return folderSetting("public", nil) }
+
+// SetCache sets the seconds browsers and CDNs may keep a folder's files in
+// Files.Folder.
+func SetCache(seconds int) Opt { return folderSetting("cache", seconds) }
+
+// InheritCache clears a folder's own Cache in Files.Folder.
+func InheritCache() Opt { return folderSetting("cache", nil) }

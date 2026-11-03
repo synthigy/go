@@ -3,6 +3,47 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.3
+
+Needs engine v0.4.1 or newer for files.
+
+### Added
+- **`Client.Files()`**: `Put` (a path creates or replaces the file there,
+  its folder must exist; an xid replaces that file; `IfMatch`, `ContentType`),
+  `PutNew` (a new file in no folder), `Download` (`ByteRange`, `IfNoneMatch`,
+  `AtVersion`), `Info`, `List` (`InFolder`: a folder's `Listing{Files,
+  Folders}`; `NoFolder`: files in no folder; neither: every file you can see;
+  `Matching` (words in order, a space for anything between), `Limit`,
+  `Offset`), `Search` (folders and files whose paths hold the words in order,
+  shortest path first), `Delete` (a file, or an empty folder), `URL` (a link
+  without a request, `Inline`), `Move` (a file or a folder), `Folder` (made
+  with every missing folder above it; `SetPublic`, `SetCache`,
+  `InheritPublic`, `InheritCache`), `Share`, `Unshare`, `Access`, `Versions`,
+  `Restore` and `Serve` (an `http.Handler`-style answer that passes Range and
+  304 through). A file is a path or an xid; a folder a path ending in `/` or
+  an xid. Types `FileInfo`, `Folder`, `FolderSettings`, `Listing`,
+  `SearchResults`, `SearchHit`, `FileVersion`, `FileDownload`, `FolderAccess`.
+  New error codes: `FILE_NOT_FOUND`, `FOLDER_NOT_FOUND`, `FILES_UNAVAILABLE`,
+  `AUDIT_UNAVAILABLE`, `VERSION_EXPIRED`, `NOT_FOUND` → `not_found`;
+  `FILE_NAME_TAKEN`, `FILE_CHANGED`, `FILE_NOT_READY`, `FOLDER_NAME_TAKEN`,
+  `FOLDER_NOT_EMPTY`, `FOLDER_CYCLE` → `conflict`; `NAME_REQUIRED`,
+  `INVALID_NAME`, `INVALID_ACCESS`, `INVALID_PATH`, `INVALID_SETTINGS`,
+  `INVALID_QUERY`, `METHOD_NOT_ALLOWED`, `INVALID_SLICE`, `FILE_TOO_LARGE`,
+  `UNSUPPORTED_MEDIA_TYPE`, `RANGE_NOT_SATISFIABLE` → `validation`. Needs a
+  server with the files module and File System 0.3.10.
+
+### Changed
+- Error categories for the deploy checks: `SYSTEM_DATASET_ENGINE_OWNED` and
+  `SYSTEM_ENTITY_ALTERED` → `iam` (a superuser may); `ENTITY_NAME_CONFLICT`,
+  `FIELD_KEY_CONFLICT` and `IMMUTABLE_VERSION_ALTERED` → `validation`. They used to
+  fall back to `internal`.
+- `UNKNOWN_TREE_RELATION` (the engine refuses an `on` of a tree op that is not a tree relation of
+  the entity) → `validation`.
+- More codes categorized: `ENGINE_OWNED` (a meta-model row or field only deploy and
+  recall write) → `iam`; `SYSTEM_ENTITY_RLS`, `RLS_GUARD_BROKEN` and
+  `VERSION_NAME_TAKEN` → `validation`; `MODEL_BUSY` (another deploy, recall or destroy
+  is running; retry when it finishes) → `conflict`.
+
 ## 0.2.2
 
 ### Added
