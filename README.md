@@ -241,7 +241,7 @@ errors the server marks retryable. A code this SDK doesn't know yet is
 
 | Method | Purpose |
 |---|---|
-| `QueryAs[T]` / `QueryRecords` / `QueryRecord` | XSQL reads with `?name:type` params, incl. `_count` / `_agg` rollups |
+| `QueryAs[T]` / `QueryRecords` / `QueryRecord` | XSQL reads with `?name:type` params, incl. `count(…)` / `avg(…)` operations |
 | `SQLTemplate` | ERD-aware SQL with `{entity.field}` placeholders (totals, joins, windows) |
 | `Sync` / `Stack` / `Slice` / `Delete` / `Purge` | writes (see below) |
 | `Schema` / `Lint` / `DeployedModel` / `RuntimeModel` | introspection |
@@ -264,21 +264,25 @@ c.Sync(ctx, "movie", map[string]any{"xid": xid, "title": "Dune"},
 ```
 ### Aggregation
 
-`_count` and `_agg` compute over a record's relations in the database — no
-child rows cross the wire:
+Operations compute over a record's relations in the database — no child rows
+cross the wire. Each is a line `alias: op(argument)`; the alias is the result
+key:
 
 ```go
 rows, _ := synthigy.QueryRecords(ctx, `
-movie (limit 10)
+movie (limit 10, order by votes desc)
   title
-  _count
-    actors:actors
-  _agg
-    ratings:movie_ratings
-      value: avg`, nil)
-// rows[i]["_count"] == map[string]any{"actors": 11}
-// rows[i]["_agg"]   == map[string]any{"ratings": map[string]any{"value": map[string]any{"avg": 4.3}}}
+  cast: count(actors)
+  votes: count(movie_ratings)
+  rating: avg(movie_ratings.value)
+  fans: count(movie_ratings.value >= 4)`, nil)
+// rows[i]["cast"] == 11, rows[i]["rating"] == 4.3
 ```
+
+`count`, `count(distinct rel.field)`, `sum`, `avg`, `min` and `max`; a second
+argument filters the related rows (`avg(movie_ratings.value,
+movie_ratings.verified = true)`). On the wire an operation is an entry on the
+relation key: `"actors": []any{map[string]any{"alias": "cast", "op": "count"}}`.
 
 For anything that is **not** a relation rollup — totals across an entity,
 cross-entity joins, window functions — use `SQLTemplate`:
@@ -315,6 +319,7 @@ fs.Move(ctx, "/site/img/logo.png", "/brand/")          // keeps the name; never 
 fs.Move(ctx, "/site/img/", "/assets/img/")             // a folder
 vs, _ := fs.Versions(ctx, fi.XID)                      // the last ten, newest first
 fs.Restore(ctx, fi.XID, vs[1].ID)
+z, _ := fs.Zip(ctx, []string{"/notes/today.txt"}, []string{"/site/img/"}) // streamed; close z.Body
 fs.Share(ctx, "/site/", "read", []string{userXID}, nil)
 fs.Delete(ctx, "/site/img/logo.png")                   // or an empty folder: "/site/img/"
 ```
@@ -342,11 +347,34 @@ has one (`InheritPublic()`, `InheritCache()` clear them); `Folder.Public` and
 `Folder.Cache` show what applies, `Folder.Settings` what is set on it. File
 User may set the cache but not public (`ATTRIBUTE_FORBIDDEN`).
 
-One put carries up to the server's `SYNTHIGY_SERVER_MAX_BODY` (25 MB by
-default). The engine's [files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
+### Links
+
+`Link` hands one file to someone without an account, or to another service:
+
+```go
+fs.Folder(ctx, "/reports/", synthigy.SetCanLink(true))  // File Admin only
+l, _ := fs.Link(ctx, "/reports/q3.pdf", synthigy.LinkExpires(600), synthigy.LinkMaxDownloads(1))
+send(l.URL)                                             // shown only now
+ls, _ := fs.Links(ctx, "/reports/q3.pdf")               // your own; File Admin sees all
+fs.Unlink(ctx, ls[0].XID)                               // ends it at once
+```
+
+- Only in folders where `CanLink` is on, inherited like `Public`, off
+  everywhere until set (`InheritCanLink()` clears it). Files in no folder never.
+- File User and File Admin make links to files they can read; File Reader cannot.
+- Every download checks that whoever made the link can still read the file.
+- `LinkExpires` seconds, 3600 by default, at most 7 days. `LinkMaxDownloads`:
+  each GET is one whole download (ranges are ignored). `Inline()` opens it in
+  the browser.
+- An expired, used-up, revoked or wrong link is `LINK_NOT_FOUND`; links off
+  for the folder is `LINKS_DISABLED`; a bad `LinkExpires` is `INVALID_EXPIRES`.
+
+One put has no size limit on the Enso and Jetty servers; on http-kit it
+carries up to `SYNTHIGY_HTTPKIT_MAX_BODY` (25 MB by default), refused with a 413.
+The engine's [files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
 covers storage, access and retention; error codes include `FILE_NOT_FOUND`,
-`FOLDER_NOT_FOUND`, `FILE_CHANGED`, `FILE_TOO_LARGE`, `VERSION_EXPIRED`,
-`INVALID_PATH`, `AUDIT_UNAVAILABLE` and `FILES_UNAVAILABLE` (no files module
+`FOLDER_NOT_FOUND`, `FILE_CHANGED`, `FILE_TOO_LARGE`, `ZIP_TOO_LARGE`, `VERSION_EXPIRED`,
+`INVALID_PATH`, `LINKS_DISABLED`, `LINK_NOT_FOUND`, `INVALID_EXPIRES`, `AUDIT_UNAVAILABLE` and `FILES_UNAVAILABLE` (no files module
 on the server).
 
 ## Filters, sorting, relations

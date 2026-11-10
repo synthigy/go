@@ -27,30 +27,24 @@ func (c *Client) Get(ctx context.Context, entity string, args Args, sel Selectio
 // Aggregation note
 // ----------------
 // There is no standalone aggregate operation. Aggregates over a record's
-// RELATIONS are requested inline in a Search/Get selection via the _count and
-// _agg selection keys:
+// RELATIONS are operation entries on the relation key of a Search/Get
+// selection; the alias is the result key:
 //
-//	// count related actors and ratings per movie
 //	client.Search(ctx, "movie", args, synthigy.Selection{
-//	    "title":  nil,
-//	    "_count": synthigy.Selection{"actors": nil, "movie-ratings": nil},
-//	})
-//	// → row["_count"] == {"actors": 11, "movie-ratings": 4}
-//
-//	// aggregate a numeric field across a relation
-//	client.Search(ctx, "user-role", args, synthigy.Selection{
-//	    "name": nil,
-//	    "_agg": synthigy.Selection{
-//	        "users": synthigy.Selection{
-//	            "priority": synthigy.Selection{"sum": nil, "avg": nil},
-//	        },
+//	    "title": nil,
+//	    "actors": []any{map[string]any{"alias": "cast", "op": "count"}},
+//	    "movie-ratings": []any{
+//	        map[string]any{"alias": "votes", "op": "count"},
+//	        map[string]any{"alias": "rating", "op": map[string]any{"avg": "value"}},
 //	    },
 //	})
-//	// → row["_agg"] == {"users": {"priority": {"sum": 60, "avg": 20}}}
+//	// → row["cast"] == 11, row["votes"] == 4, row["rating"] == 4.25
 //
-// These normalize to the same wire shape as relations and need no special
-// API. For aggregation that is NOT a relation rollup (totals across an
-// entity, cross-entity joins, window functions, etc.) use SQLTemplate.
+// "op" is "count" or {fn: field} with fn sum, avg, min, max or count_distinct;
+// "args" ({"_where": …}) filters the counted rows. Entries mix with
+// Rel(...) configs in the same array. For aggregation that is NOT a relation
+// rollup (totals across an entity, cross-entity joins, window functions,
+// etc.) use SQLTemplate.
 
 // Sync upserts an entity (replacing relations). Writes are silent by default —
 // the returned Record is {"count": n}. Pass Returning() for the written

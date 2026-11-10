@@ -75,8 +75,9 @@ type FileDownload struct {
 
 // FolderSettings are the values set on a folder itself; nil inherits.
 type FolderSettings struct {
-	Public *bool `json:"public"`
-	Cache  *int  `json:"cache"`
+	Public  *bool `json:"public"`
+	Cache   *int  `json:"cache"`
+	CanLink *bool `json:"can_link"`
 }
 
 // Folder is a folder as the files endpoints answer it.
@@ -94,8 +95,25 @@ type Folder struct {
 	// Cache is the seconds browsers and CDNs may keep the files, set the same
 	// way; nil: they check every time.
 	Cache *int `json:"cache"`
+	// CanLink: download links may be made for files here, set the same way.
+	CanLink bool `json:"can_link"`
 	// Settings holds what is set on this folder itself.
 	Settings FolderSettings `json:"settings"`
+}
+
+// FileLink is a download link: it loads the file without signing in.
+type FileLink struct {
+	XID string `json:"xid"`
+	// File is the file's xid.
+	File string `json:"file"`
+	// CreatedBy made it; the link works while they can read the file.
+	CreatedBy    string `json:"created_by"`
+	ExpiresAt    string `json:"expires_at"`
+	MaxDownloads *int   `json:"max_downloads"`
+	Downloads    int    `json:"downloads"`
+	Inline       bool   `json:"inline"`
+	// URL is set only on the link Files.Link just made; it cannot be read back.
+	URL string `json:"url,omitempty"`
 }
 
 // Listing is one folder's files and subfolders.
@@ -268,7 +286,7 @@ func (f *FilesAPI) write(ctx context.Context, method, path string, q url.Values,
 	if body == nil {
 		body = strings.NewReader("")
 	}
-	resp, err := f.send(ctx, method, f.url(path, q), body, h, true)
+	resp, err := f.send(ctx, method, f.url(path, q), body, h, false)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +331,7 @@ func rangeHeader(r [2]int64) string {
 }
 
 // Download opens the bytes of a file. Use ByteRange, IfNoneMatch and
-// AtVersion. The caller closes Body.
+// AtVersion. Bound by ctx alone, not the client Timeout. The caller closes Body.
 func (f *FilesAPI) Download(ctx context.Context, ref string, opts ...Opt) (*FileDownload, error) {
 	o := applyOpts(opts)
 	h := map[string]string{}
@@ -331,7 +349,7 @@ func (f *FilesAPI) Download(ctx context.Context, ref string, opts ...Opt) (*File
 		}
 		path, q = xidPath(xid)+"/versions/"+strconv.FormatInt(*o.version, 10), nil
 	}
-	resp, err := f.send(ctx, http.MethodGet, f.url(path, q), nil, h, true)
+	resp, err := f.send(ctx, http.MethodGet, f.url(path, q), nil, h, false)
 	if err != nil {
 		return nil, err
 	}
@@ -350,6 +368,25 @@ func (f *FilesAPI) Download(ctx context.Context, ref string, opts ...Opt) (*File
 		}
 	}
 	return d, nil
+}
+
+// Zip streams one zip of files and of everything inside folders (xids or
+// paths), read as you; what you cannot read is listed in its _skipped.txt.
+// Like every file transfer it is bound by ctx alone. The caller closes Body.
+func (f *FilesAPI) Zip(ctx context.Context, files, folders []string) (*FileDownload, error) {
+	if files == nil {
+		files = []string{}
+	}
+	if folders == nil {
+		folders = []string{}
+	}
+	raw, _ := json.Marshal(map[string][]string{"files": files, "folders": folders})
+	resp, err := f.send(ctx, http.MethodPost, f.url("/zip", nil), bytes.NewReader(raw),
+		map[string]string{"Content-Type": "application/json"}, false)
+	if err != nil {
+		return nil, err
+	}
+	return &FileDownload{Body: resp.Body, ContentType: resp.Header.Get("Content-Type"), Length: resp.ContentLength}, nil
 }
 
 // Info returns the file, or nil when it is not there or you cannot see it.
@@ -514,7 +551,7 @@ func (f *FilesAPI) Move(ctx context.Context, from, to string) (*FileInfo, *Folde
 }
 
 // Folder returns the folder at path, made with every missing folder above
-// it. SetPublic, SetCache, InheritPublic and InheritCache change its settings.
+// it. SetPublic, SetCache, SetCanLink and their Inherit forms change its settings.
 func (f *FilesAPI) Folder(ctx context.Context, path string, opts ...Opt) (*Folder, error) {
 	settings := applyOpts(opts).folderSettings
 	if settings == nil {
@@ -587,12 +624,60 @@ func (f *FilesAPI) Restore(ctx context.Context, ref string, id int64) (*FileInfo
 	return &out, nil
 }
 
+// Link makes a download link for a file in a folder where links are on. Use
+// LinkExpires, LinkMaxDownloads and Inline. Its URL is shown only now.
+func (f *FilesAPI) Link(ctx context.Context, ref string, opts ...Opt) (*FileLink, error) {
+	xid, err := f.xidAt(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	o := applyOpts(opts)
+	payload := map[string]any{}
+	if o.linkExpires != nil {
+		payload["expires"] = *o.linkExpires
+	}
+	if o.linkMaxDl != nil {
+		payload["max_downloads"] = *o.linkMaxDl
+	}
+	if o.inline {
+		payload["inline"] = true
+	}
+	var out FileLink
+	if err := f.json(ctx, http.MethodPost, xidPath(xid)+"/links", nil, payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Links returns the file's live links you can see: your own, or all of them
+// for File Admin.
+func (f *FilesAPI) Links(ctx context.Context, ref string) ([]FileLink, error) {
+	xid, err := f.xidAt(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Links []FileLink `json:"links"`
+	}
+	if err := f.json(ctx, http.MethodGet, xidPath(xid)+"/links", nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Links, nil
+}
+
+// Unlink ends a link (its xid) at once, on every engine.
+func (f *FilesAPI) Unlink(ctx context.Context, link string) error {
+	return f.json(ctx, http.MethodDelete, "/links"+xidPath(link), nil, nil, nil)
+}
+
 var servedHeaders = []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag",
 	"Content-Disposition", "Cache-Control", "X-Content-Type-Options", "Content-Security-Policy"}
 
 // Serve answers a browser's request with a file. Range, If-None-Match and
 // If-Range go through, and the answer keeps status, type, length, ETag and
 // name; a refusal is the engine's own answer. Inline opens it in the browser.
+// Our own credentials failing or the network is written as a plain 401/502:
+// the caller never sees it, so check credentials at startup.
 func (f *FilesAPI) Serve(w http.ResponseWriter, r *http.Request, ref string, opts ...Opt) {
 	h := map[string]string{}
 	for _, k := range []string{"Range", "If-None-Match", "If-Range"} {

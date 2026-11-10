@@ -147,25 +147,15 @@ func TestNestedRelationsStayBare(t *testing.T) {
 	}
 }
 
-func TestAggregateKeysSkipLeftJoin(t *testing.T) {
-	// _count / _agg subtrees must stay untouched like everything else.
-	got := normalizeSelection(Selection{
-		"title":  nil,
-		"_count": Selection{"actors": nil},
-		"_agg":   Selection{"ratings": Selection{"rating": Selection{"_avg": nil}}},
-	}).(map[string]any)
-	for _, key := range []string{"_count", "_agg"} {
-		arr := got[key].([]any)
-		cfg := arr[0].(map[string]any)
-		if _, has := asArgsMap(cfg["args"])["_join"]; has {
-			t.Errorf("%s should not carry _join: %s", key, normJSON(t, cfg))
-		}
+func TestOperationEntriesPassThrough(t *testing.T) {
+	ops := []any{
+		map[string]any{"alias": "votes", "op": "count"},
+		map[string]any{"alias": "rating", "op": map[string]any{"avg": "value"}},
 	}
-	// And the relation inside _agg's subtree must also be untouched.
-	aggSel := got["_agg"].([]any)[0].(map[string]any)["selections"].(map[string]any)
-	ratings := aggSel["ratings"].([]any)[0].(map[string]any)
-	if _, has := asArgsMap(ratings["args"])["_join"]; has {
-		t.Errorf("relation inside _agg should not carry _join: %s", normJSON(t, ratings))
+	got := normalizeSelection(Selection{"title": nil, "ratings": ops})
+	want := map[string]any{"title": nil, "ratings": ops}
+	if normJSON(t, got) != normJSON(t, want) {
+		t.Errorf("operation entries changed: %s", normJSON(t, got))
 	}
 }
 

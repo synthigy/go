@@ -16,7 +16,7 @@ func TestPascal(t *testing.T) {
 		{"music-album", "MusicAlbum"},
 		{"music album", "MusicAlbum"},
 		{"MusicAlbum", "MusicAlbum"},
-		{"_count", "Count"}, // via leading-underscore split
+		{"_meta", "Meta"}, // via leading-underscore split
 		{"", "X"},           // empty → placeholder
 	}
 	for _, tc := range cases {
@@ -62,19 +62,11 @@ func TestGoType(t *testing.T) {
 	}
 }
 
-func TestMapFieldName(t *testing.T) {
-	if got := mapFieldName("_count"); got != "Count" {
-		t.Errorf("mapFieldName(_count) = %q", got)
-	}
-	if got := mapFieldName("_agg"); got != "Agg" {
-		t.Errorf("mapFieldName(_agg) = %q", got)
-	}
-}
-
 // TestGenerateProducesValidGo is the golden guard: a minimal schema + IR must
 // emit Go that (a) parses, (b) declares the entity read/write structs, and
 // (c) declares the namespace type with its typed read method + write verbs.
 func TestGenerateProducesValidGo(t *testing.T) {
+	notNull := false
 	S := &schema{Entities: map[string]entity{
 		"music_album": {
 			Name:       "Music Album",
@@ -92,6 +84,8 @@ func TestGenerateProducesValidGo(t *testing.T) {
 			Result: result{Kind: "list", Fields: []field{
 				{Key: "title", Type: "string"},
 				{Key: "plays", Type: "int"},
+				{Key: "track_count", Kind: "op", Type: "int", Nullable: &notNull},
+				{Key: "mean_plays", Kind: "op", Type: "float"},
 			}},
 		},
 	}}
@@ -116,6 +110,8 @@ func TestGenerateProducesValidGo(t *testing.T) {
 		"func (MusicAlbumNS) StackMany(",
 		"func toMaps[T any]",
 		"var API APISurface", // single-client surface
+		"TrackCount int64 `json:\"track_count\"`",
+		"MeanPlays *float64 `json:\"mean_plays,omitempty\"`",
 	}
 	for _, w := range wants {
 		if !strings.Contains(src, w) {

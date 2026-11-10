@@ -108,34 +108,30 @@ func TestPerOpError(t *testing.T) {
 	}
 }
 
-func TestCountSelectionWireShape(t *testing.T) {
-	// _count is a selection key (related-entity rollup), not a standalone op.
-	// Verify it normalizes to the relation rel-config wire shape inside search.
+func TestOperationSelectionWireShape(t *testing.T) {
 	var gotBody map[string]any
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &gotBody)
 		writeResults(w, []map[string]any{
-			{"ok": true, "data": []map[string]any{{"title": "Toy Story", "_count": map[string]any{"actors": 11}}}},
+			{"ok": true, "data": []map[string]any{{"title": "Toy Story", "cast_size": 11}}},
 		})
 	}))
 	rows, err := c.Search(context.Background(), "movie", Args{"_limit": 1},
-		Selection{"title": nil, "_count": Selection{"actors": nil}})
+		Selection{"title": nil, "actors": []any{map[string]any{"alias": "cast_size", "op": "count"}}})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if cnt, _ := rows[0]["_count"].(map[string]any); cnt["actors"].(float64) != 11 {
-		t.Fatalf("unexpected _count: %v", rows[0])
+	if n, _ := rows[0]["cast_size"].(float64); n != 11 {
+		t.Fatalf("unexpected cast_size: %v", rows[0])
 	}
 	op := gotBody["operations"].([]any)[0].(map[string]any)
-	sel := op["selections"].(map[string]any)
-	arr, ok := sel["_count"].([]any)
+	arr, ok := op["selections"].(map[string]any)["actors"].([]any)
 	if !ok || len(arr) != 1 {
-		t.Fatalf("_count not normalized to rel-config array: %v", sel["_count"])
+		t.Fatalf("actors not sent as an entry array: %v", op["selections"])
 	}
-	cfg := arr[0].(map[string]any)
-	if _, ok := cfg["selections"].(map[string]any)["actors"]; !ok {
-		t.Errorf("_count selections missing actors: %v", cfg)
+	if cfg := arr[0].(map[string]any); cfg["alias"] != "cast_size" || cfg["op"] != "count" {
+		t.Errorf("operation entry changed: %v", cfg)
 	}
 }
 

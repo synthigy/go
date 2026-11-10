@@ -86,11 +86,10 @@ type result struct {
 type field struct {
 	Key         string  `json:"key"`
 	Type        string  `json:"type"`
-	Kind        string  `json:"kind"` // "", "relation", "map"
+	Kind        string  `json:"kind"` // "", "relation", "op"
 	Nullable    *bool   `json:"nullable"`
 	Optional    bool    `json:"optional"`
 	Cardinality string  `json:"cardinality"`
-	Value       string  `json:"value"` // map value type
 	Fields      []field `json:"fields"`
 }
 
@@ -106,8 +105,9 @@ type entity struct {
 }
 
 type attr struct {
-	Type  string            `json:"type"`
-	Skins map[string]string `json:"skins"`
+	Type     string            `json:"type"`
+	Skins    map[string]string `json:"skins"`
+	ReadOnly bool              `json:"read-only"`
 }
 
 type relation struct {
@@ -590,7 +590,7 @@ func (g *generator) entityStructs(name string, e entity) string {
 			readSeen[F] = true
 			read = append(read, fmt.Sprintf("\t%s %s `json:%q`", F, ptr(gt), a))
 		}
-		if !writeSeen[F] && !relPascal[F] {
+		if !writeSeen[F] && !relPascal[F] && !e.Attributes[a].ReadOnly {
 			writeSeen[F] = true
 			write = append(write, fmt.Sprintf("\t%s %s `json:\"%s,omitempty\"`", F, ptr(gt), a))
 		}
@@ -599,7 +599,7 @@ func (g *generator) entityStructs(name string, e entity) string {
 	// left to projection (op result) types, not the flat entity struct.
 	for _, r := range relNames {
 		F := relPascalOf(r)
-		if writeSeen[F] {
+		if writeSeen[F] || e.Attributes[r].ReadOnly {
 			continue
 		}
 		writeSeen[F] = true
@@ -894,9 +894,6 @@ func (g *generator) projectionStruct(typeName, entityName string, fields []field
 	seen := map[string]bool{}
 	for _, f := range fields {
 		fn := pascal(f.Key)
-		if f.Kind == "map" {
-			fn = mapFieldName(f.Key)
-		}
 		if seen[fn] {
 			continue
 		}
@@ -910,12 +907,6 @@ func (g *generator) projectionStruct(typeName, entityName string, fields []field
 				t = "[]" + nested
 			}
 			lines = append(lines, fmt.Sprintf("\t%s %s `json:\"%s,omitempty\"`", pascal(f.Key), t, f.Key))
-		case "map":
-			t := "map[string]any"
-			if f.Value == "int" {
-				t = "map[string]int64"
-			}
-			lines = append(lines, fmt.Sprintf("\t%s %s `json:\"%s,omitempty\"`", mapFieldName(f.Key), t, f.Key))
 		default:
 			gt := goType(f.Type)
 			if f.Nullable != nil && !*f.Nullable {
@@ -1006,11 +997,6 @@ func ptr(t string) string {
 		return t // *any is pointless; leave as any
 	}
 	return "*" + t
-}
-
-func mapFieldName(key string) string {
-	// "_count" → "Count", "_agg" → "Agg"
-	return pascal(strings.TrimPrefix(key, "_"))
 }
 
 // skinOr prefers the server-rendered skin

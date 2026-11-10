@@ -357,7 +357,7 @@ func TestFilesLive(t *testing.T) {
 		t.Fatalf("cache: %v", err)
 	}
 	shown, err := af.Folder(ctx, top, SetPublic(true))
-	if err != nil || !shown.Public || shown.Cache == nil || *shown.Cache != 120 || shown.Settings.Public == nil || !*shown.Settings.Public {
+	if err != nil || !shown.Public || shown.Cache == nil || *shown.Cache != 120 || shown.Settings.Public == nil || !*shown.Settings.Public || shown.Settings.CanLink != nil {
 		t.Fatalf("public: %+v, %v", shown, err)
 	}
 	for _, u := range []string{uf.URL(note.XID), uf.URL(notePath)} {
@@ -412,6 +412,130 @@ func TestFilesLive(t *testing.T) {
 	uf.Serve(rec, httptest.NewRequest("GET", "/x", nil), top+"gone-"+run+".txt")
 	if rec.Code != 404 {
 		t.Fatalf("serve missing = %d", rec.Code)
+	}
+
+	// 5b. download links.
+	shut, err := uf.Put(ctx, top+"link-"+run+".txt", strings.NewReader("linked"))
+	if err != nil {
+		t.Fatalf("put linked: %v", err)
+	}
+	fileXIDs = append(fileXIDs, shut.XID)
+	if _, err := af.Folder(ctx, top, SetPublic(false)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = uf.Link(ctx, shut.XID)
+	expectFilesErr(t, "links off", err, "LINKS_DISABLED", "iam")
+	_, err = uf.Folder(ctx, top, SetCanLink(true))
+	expectFilesErr(t, "user sets can_link", err, "ATTRIBUTE_FORBIDDEN", "iam")
+	if d, err := af.Folder(ctx, top, SetCanLink(true)); err != nil || !d.CanLink {
+		t.Fatalf("can_link on: %+v, %v", d, err)
+	}
+	_, err = rf.Link(ctx, shut.XID)
+	expectFilesErr(t, "reader link", err, "FORBIDDEN", "iam")
+	_, err = uf.Link(ctx, shut.XID, LinkExpires(0))
+	expectFilesErr(t, "expires 0", err, "INVALID_EXPIRES", "validation")
+
+	link, err := uf.Link(ctx, shut.XID, LinkExpires(600))
+	if err != nil || link.File != shut.XID || link.CreatedBy != userMe.XID || link.Downloads != 0 || link.URL == "" {
+		t.Fatalf("link: %+v, %v", link, err)
+	}
+	if b, h := fetchLink(t, link.URL); string(b) != "linked" || h.Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("link get = %q, %v", b, h)
+	}
+	once, err := uf.Link(ctx, shut.XID, LinkMaxDownloads(1), Inline())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rq, _ := http.NewRequest("GET", once.URL, nil)
+	rq.Header.Set("Range", "bytes=1-2")
+	resp, err := http.DefaultClient.Do(rq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(b) != "linked" || !strings.HasPrefix(resp.Header.Get("Content-Disposition"), "inline") {
+		t.Fatalf("limited link ignores Range: %d %q %v", resp.StatusCode, b, resp.Header)
+	}
+	if s := linkStatus(t, once.URL); s != 404 {
+		t.Fatalf("used up = %d", s)
+	}
+
+	camel, err := New(Config{Endpoint: os.Getenv("SYNTHIGY_FILES_TEST_ENDPOINT"), ClientID: os.Getenv("SYNTHIGY_FILES_TEST_USER_ID"),
+		ClientSecret: os.Getenv("SYNTHIGY_FILES_TEST_USER_SECRET"), KeyFormat: "camel", Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer camel.Close()
+	has := func(ls []FileLink, xid string) *FileLink {
+		for i := range ls {
+			if ls[i].XID == xid {
+				return &ls[i]
+			}
+		}
+		return nil
+	}
+	cls, err := camel.Files().Links(ctx, shut.XID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs := has(cls, link.XID); cs == nil || cs.CreatedBy != userMe.XID || cs.MaxDownloads != nil {
+		t.Fatalf("keyFormat camel links: %+v", cls)
+	}
+	if ci, err := camel.Files().Info(ctx, shut.XID); err != nil || ci.ContentType == "" || ci.ContentType != shut.ContentType {
+		t.Fatalf("keyFormat camel info: %+v, %v", ci, err)
+	}
+
+	mine, err := uf.Links(ctx, shut.XID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := has(mine, link.XID); m == nil || m.Downloads != 1 {
+		t.Fatalf("mine: %+v", mine)
+	}
+	for _, l := range mine {
+		if l.URL != "" {
+			t.Fatalf("the url is shown once: %+v", l)
+		}
+	}
+	admins, err := af.Link(ctx, shut.XID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mine, _ := uf.Links(ctx, shut.XID); has(mine, admins.XID) != nil {
+		t.Fatalf("File User sees its own only")
+	}
+	if all, _ := af.Links(ctx, shut.XID); has(all, link.XID) == nil {
+		t.Fatalf("File Admin sees all")
+	}
+	expectFilesErr(t, "unlink other's", uf.Unlink(ctx, admins.XID), "LINK_NOT_FOUND", "not_found")
+
+	if _, err := af.Folder(ctx, top, SetCanLink(false)); err != nil {
+		t.Fatal(err)
+	}
+	if s := linkStatus(t, link.URL); s != 404 {
+		t.Fatalf("switched off: existing links stop = %d", s)
+	}
+	if _, err := af.Folder(ctx, top, SetCanLink(true)); err != nil {
+		t.Fatal(err)
+	}
+	if s := linkStatus(t, link.URL); s != 200 {
+		t.Fatalf("switched on again = %d", s)
+	}
+	if err := uf.Unlink(ctx, link.XID); err != nil {
+		t.Fatal(err)
+	}
+	if s := linkStatus(t, link.URL); s != 404 {
+		t.Fatalf("unlinked = %d", s)
+	}
+	if err := uf.Delete(ctx, shut.XID); err != nil {
+		t.Fatal(err)
+	}
+	if s := linkStatus(t, admins.URL); s != 404 {
+		t.Fatalf("file deleted: its links die = %d", s)
+	}
+	if _, err := af.Folder(ctx, top, SetPublic(true), InheritCanLink()); err != nil {
+		t.Fatal(err)
 	}
 
 	// 6. admin moves the subfolder to ROOT and deletes it.

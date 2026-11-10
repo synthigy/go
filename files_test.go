@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -129,6 +130,75 @@ func TestFilesInfoAndErrors(t *testing.T) {
 	}
 	if _, err := c.Files().Versions(ctx, "/x/r.txt"); !hasCode(err, "FILE_NOT_FOUND") {
 		t.Fatalf("versions of a missing path = %v", err)
+	}
+}
+
+func TestFilesTimeoutSparesFileBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		time.Sleep(300 * time.Millisecond)
+		if strings.HasSuffix(r.URL.Path, "/info") {
+			writeJSON(w, 200, map[string]any{"xid": "f1"})
+			return
+		}
+		if r.Method == http.MethodPut {
+			writeJSON(w, 200, map[string]any{"xid": "f1"})
+			return
+		}
+		_, _ = io.WriteString(w, "late bytes")
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{Endpoint: srv.URL, Token: "test-token", Timeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	d, err := c.Files().Download(ctx, "f1")
+	if err != nil {
+		t.Fatalf("download under a short client timeout: %v", err)
+	}
+	b, _ := io.ReadAll(d.Body)
+	d.Body.Close()
+	if string(b) != "late bytes" {
+		t.Fatalf("download = %q", b)
+	}
+	if _, err := c.Files().Put(ctx, "f1", strings.NewReader("v2")); err != nil {
+		t.Fatalf("put under a short client timeout: %v", err)
+	}
+	if _, err := c.Files().Info(ctx, "f1"); err == nil {
+		t.Fatal("info must still honour the client timeout")
+	}
+}
+
+func TestFilesZip(t *testing.T) {
+	n := 0
+	c, calls := filesStub(t, func(w http.ResponseWriter, r *http.Request) {
+		if n++; n == 2 {
+			writeJSON(w, 413, map[string]any{"error": map[string]any{"code": "ZIP_TOO_LARGE", "message": "too big"}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		_, _ = io.WriteString(w, "PK")
+	})
+	ctx := context.Background()
+	d, err := c.Files().Zip(ctx, []string{"f1", "/a/r.txt"}, []string{"/site/img/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(d.Body)
+	d.Body.Close()
+	if string(b) != "PK" || d.ContentType != "application/zip" {
+		t.Fatalf("zip = %q %+v", b, d)
+	}
+	if got := (*calls)[0]; got.method != "POST" || got.path != "/files/zip" || got.ctype != "application/json" ||
+		got.body != `{"files":["f1","/a/r.txt"],"folders":["/site/img/"]}` {
+		t.Fatalf("zip call = %+v", got)
+	}
+	if _, err := c.Files().Zip(ctx, nil, []string{"/big/"}); !hasCode(err, "ZIP_TOO_LARGE") {
+		t.Fatalf("over the caps = %v", err)
+	}
+	if (*calls)[1].body != `{"files":[],"folders":["/big/"]}` {
+		t.Fatalf("nil files must be an empty list: %s", (*calls)[1].body)
 	}
 }
 
@@ -339,5 +409,100 @@ func TestFilesURLAndServe(t *testing.T) {
 	fs.Serve(rec, httptest.NewRequest("GET", "/x", nil), "/gone.txt")
 	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "FILE_NOT_FOUND") {
 		t.Fatalf("missing = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFilesLinks(t *testing.T) {
+	made := map[string]any{"xid": "l1", "file": "f1", "url": "http://files.test/files/link/t", "downloads": 0, "max_downloads": 2, "inline": true}
+	c, calls := filesStub(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/files/info":
+			writeJSON(w, 200, map[string]any{"xid": "f1"})
+		case r.Method == "DELETE":
+			w.WriteHeader(204)
+		case r.Method == "GET":
+			writeJSON(w, 200, map[string]any{"file": "f1", "links": []any{made}})
+		default:
+			writeJSON(w, 201, made)
+		}
+	})
+	ctx := context.Background()
+	fs := c.Files()
+	l, err := fs.Link(ctx, "/a.txt", LinkExpires(600), LinkMaxDownloads(2), Inline())
+	if err != nil || l.URL != made["url"] || l.MaxDownloads == nil || *l.MaxDownloads != 2 || !l.Inline {
+		t.Fatalf("link = %+v, %v", l, err)
+	}
+	ls, err := fs.Links(ctx, "f1")
+	if err != nil || len(ls) != 1 || ls[0].XID != "l1" {
+		t.Fatalf("links = %+v, %v", ls, err)
+	}
+	if err := fs.Unlink(ctx, l.XID); err != nil {
+		t.Fatal(err)
+	}
+	want := []filesCall{
+		{"GET", "/files/info", "path=%2Fa.txt", "", "", ""},
+		{"POST", "/files/f1/links", "", "application/json", "", `{"expires":600,"inline":true,"max_downloads":2}`},
+		{"GET", "/files/f1/links", "", "", "", ""},
+		{"DELETE", "/files/links/l1", "", "", "", ""},
+	}
+	for i, w := range want {
+		if (*calls)[i] != w {
+			t.Fatalf("call %d = %+v, want %+v", i, (*calls)[i], w)
+		}
+	}
+	if _, err := fs.Link(ctx, "f1"); err != nil || (*calls)[4].body != `{}` {
+		t.Fatalf("plain link = %v, %+v", err, (*calls)[4])
+	}
+}
+
+func TestFilesLinkRefusalsAndCanLink(t *testing.T) {
+	c, calls := filesStub(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/files/f1/links" && r.URL.RawQuery == "":
+			writeJSON(w, 403, map[string]any{"error": map[string]any{"code": "LINKS_DISABLED", "message": "off"}})
+		case r.URL.Path == "/files/f2/links":
+			writeJSON(w, 400, map[string]any{"error": map[string]any{"code": "INVALID_EXPIRES", "message": "bad"}})
+		case r.URL.Path == "/files/links/l9":
+			writeJSON(w, 404, map[string]any{"error": map[string]any{"code": "LINK_NOT_FOUND", "message": "gone"}})
+		default:
+			writeJSON(w, 200, map[string]any{"xid": "d1", "path": "/s/", "can_link": true,
+				"settings": map[string]any{"public": nil, "cache": 60, "can_link": true}})
+		}
+	})
+	ctx := context.Background()
+	fs := c.Files()
+	for _, tc := range []struct {
+		err       error
+		code, cat string
+	}{
+		{func() error { _, err := fs.Link(ctx, "f1"); return err }(), "LINKS_DISABLED", "iam"},
+		{func() error { _, err := fs.Link(ctx, "f2", LinkExpires(0)); return err }(), "INVALID_EXPIRES", "validation"},
+		{fs.Unlink(ctx, "l9"), "LINK_NOT_FOUND", "not_found"},
+	} {
+		var e *Error
+		if !errors.As(tc.err, &e) || e.Code != tc.code || e.Category != tc.cat {
+			t.Fatalf("%s = %v", tc.code, tc.err)
+		}
+	}
+	d, err := fs.Folder(ctx, "/s/", SetCanLink(true), SetCache(60))
+	if err != nil || !d.CanLink || d.Settings.CanLink == nil || !*d.Settings.CanLink || (*calls)[3].body != `{"cache":60,"can_link":true}` {
+		t.Fatalf("folder = %+v, %v, %+v", d, err, (*calls)[3])
+	}
+	if _, err := fs.Folder(ctx, "/s/", InheritCanLink()); err != nil || (*calls)[4].body != `{"can_link":null}` {
+		t.Fatalf("inherit = %v, %+v", err, (*calls)[4])
+	}
+}
+
+func TestFilesKeyFormatStaysSnake(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		writeJSON(w, 200, map[string]any{"xid": "f1", "content_type": "text/plain"})
+	}))
+	t.Cleanup(srv.Close)
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t", KeyFormat: "camel"})
+	fi, err := c.Files().Info(context.Background(), "f1")
+	if err != nil || fi.ContentType != "text/plain" || strings.Join(queries, "|") != "" {
+		t.Fatalf("info = %+v, %v, queries %q", fi, err, queries)
 	}
 }

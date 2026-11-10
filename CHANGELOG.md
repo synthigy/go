@@ -3,6 +3,35 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.4
+
+Needs an engine with `POST /files/zip` (after v0.4.1).
+
+### Breaking
+- **`_count` / `_agg` are gone** (engine after v0.4.1 refuses them).
+  Write an operation per value: XSQL `votes: count(ratings)`,
+  `rating: avg(ratings.value)`; on the wire an `{alias, op, args?}` entry
+  on the relation key. The alias is the result key and can be sorted by.
+- `synthigy-gen` types an operation as a plain field (counts `int`, never null;
+  `avg` float; `sum`/`min`/`max` the field's type). The `_count` / `_agg`
+  map fields are gone; regenerate.
+
+### Added
+- **`Files().Zip(ctx, files, folders)`**: one zip of the files and of
+  everything inside the folders, read as you, streamed as a `FileDownload`;
+  the client timeout does not apply. `ZIP_TOO_LARGE` joins the error codes.
+- **`Files().Link(ctx, file, ...)`** (`LinkExpires`, `LinkMaxDownloads`,
+  `Inline`), `Links(ctx, file)`, `Unlink(ctx, linkXID)`: download links for
+  people without an account, where the folder's `CanLink` allows them;
+  `SetCanLink` / `InheritCanLink` for `Folder`, `Folder.CanLink`,
+  `FolderSettings.CanLink`. `LINKS_DISABLED`, `LINK_NOT_FOUND` and
+  `INVALID_EXPIRES` join the error codes.
+
+### Fixed
+- `Config.Timeout` no longer cuts file bytes short: `Files().Put`, `PutNew`
+  and `Download` (like `Zip` and `Serve`) are bound by their `ctx` alone.
+- `FILES_MIGRATING` (uploads paused while the server moves files to a new store) is now category `internal` and retryable; it was unknown, so never retryable.
+
 ## 0.2.3
 
 Needs engine v0.4.1 or newer for files.

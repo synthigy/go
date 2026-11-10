@@ -241,30 +241,29 @@ func TestLiveActingAsTrusted(t *testing.T) {
 	}
 }
 
-// TestLiveCountSelection exercises related-entity aggregation via the _count
-// selection key (the supported path — there is no standalone aggregate op).
-func TestLiveCountSelection(t *testing.T) {
+// TestLiveOperationSelection counts related rows with an operation entry
+// (there is no standalone aggregate op).
+func TestLiveOperationSelection(t *testing.T) {
 	c := liveClient(t)
 	ctx, cancel := ctx30(t)
 	defer cancel()
 	rows, err := c.Search(ctx, "movie", Args{"_limit": 2},
-		Selection{"title": nil, "_count": Selection{"actors": nil}},
+		Selection{"title": nil, "actors": []any{map[string]any{"alias": "cast", "op": "count"}}},
 		KeyFormat("kebab"))
 	if err != nil {
-		t.Fatalf("Search with _count: %v", err)
+		t.Fatalf("Search with an operation: %v", err)
 	}
 	if len(rows) == 0 {
 		t.Fatal("no rows")
 	}
-	cnt, ok := rows[0]["_count"].(map[string]any)
-	if !ok {
-		t.Fatalf("row missing _count: %v", rows[0])
+	if _, ok := rows[0]["cast"].(float64); !ok {
+		t.Fatalf("row missing cast count: %v", rows[0])
 	}
-	t.Logf("%v actors = %v", rows[0]["title"], cnt["actors"])
+	t.Logf("%v actors = %v", rows[0]["title"], rows[0]["cast"])
 }
 
 // TestLiveAggregateOpGone documents that the raw aggregate op is rejected
-// (UNKNOWN_OP) — aggregation is _count/_agg (relations) or sql-template.
+// (UNKNOWN_OP) — aggregation is a selection operation or sql-template.
 func TestLiveAggregateOpGone(t *testing.T) {
 	c := liveClient(t)
 	ctx, cancel := ctx30(t)

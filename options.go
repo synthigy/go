@@ -56,6 +56,8 @@ type callOptions struct {
 	offset         *int
 	inline         bool
 	folderSettings map[string]any
+	linkExpires    *int
+	linkMaxDl      *int
 }
 
 func applyOpts(opts []Opt) callOptions {
@@ -208,8 +210,8 @@ func NoFolder() Opt { return func(o *callOptions) { o.noFolder = true } }
 // Offset skips the first n results of Files.List or Files.Search.
 func Offset(n int) Opt { return func(o *callOptions) { o.offset = &n } }
 
-// Inline makes a Files.URL or Files.Serve answer open in the browser instead
-// of downloading.
+// Inline makes a Files.URL, Files.Serve or Files.Link answer open in the
+// browser instead of downloading.
 func Inline() Opt { return func(o *callOptions) { o.inline = true } }
 
 func folderSetting(key string, v any) Opt {
@@ -234,3 +236,16 @@ func SetCache(seconds int) Opt { return folderSetting("cache", seconds) }
 
 // InheritCache clears a folder's own Cache in Files.Folder.
 func InheritCache() Opt { return folderSetting("cache", nil) }
+
+// SetCanLink switches download links on or off for a folder in Files.Folder;
+// File Admin only.
+func SetCanLink(v bool) Opt { return folderSetting("can_link", v) }
+
+// InheritCanLink clears a folder's own CanLink in Files.Folder.
+func InheritCanLink() Opt { return folderSetting("can_link", nil) }
+
+// LinkExpires sets the seconds a Files.Link lives: default 3600, at most 7 days.
+func LinkExpires(seconds int) Opt { return func(o *callOptions) { o.linkExpires = &seconds } }
+
+// LinkMaxDownloads caps the downloads a Files.Link allows; unset is unlimited.
+func LinkMaxDownloads(n int) Opt { return func(o *callOptions) { o.linkMaxDl = &n } }

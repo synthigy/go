@@ -52,7 +52,8 @@ type Config struct {
 
 	// Timeout is the default per-request deadline applied to non-streaming
 	// calls when the caller's context has no deadline of its own. Zero means
-	// no default timeout.
+	// no default timeout. File bytes (Files Put, PutNew, Download, Zip,
+	// Serve) are exempt: a large file takes as long as it takes.
 	Timeout time.Duration
 
 	// HTTPClient overrides the underlying *http.Client. When nil a client

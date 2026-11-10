@@ -51,6 +51,7 @@ var errorCategories = map[string]string{
 	"RELATION_NOT_READABLE":       "iam",
 	"RELATION_FORBIDDEN":          "iam",
 	"ATTRIBUTE_FORBIDDEN":         "iam",
+	"LINKS_DISABLED":              "iam",
 	"ROW_FORBIDDEN":               "iam",
 	"CREATE_FORBIDDEN":            "iam",
 	"DELETE_FORBIDDEN":            "iam",
@@ -101,6 +102,7 @@ var errorCategories = map[string]string{
 	"INVALID_NAME":                       "validation",
 	"INVALID_ACCESS":                     "validation",
 	"FILE_TOO_LARGE":                     "validation",
+	"ZIP_TOO_LARGE":                      "validation",
 	"UNSUPPORTED_MEDIA_TYPE":             "validation",
 	"RANGE_NOT_SATISFIABLE":              "validation",
 	"INVALID_PATH":                       "validation",
@@ -108,6 +110,7 @@ var errorCategories = map[string]string{
 	"INVALID_QUERY":                      "validation",
 	"METHOD_NOT_ALLOWED":                 "validation",
 	"INVALID_SLICE":                      "validation",
+	"INVALID_EXPIRES":                    "validation",
 	// not_found
 	"UNKNOWN_ENTITY":            "not_found",
 	"UNKNOWN_RELATION":          "not_found",
@@ -117,8 +120,10 @@ var errorCategories = map[string]string{
 	"FILE_NOT_FOUND":            "not_found",
 	"FOLDER_NOT_FOUND":          "not_found",
 	"VERSION_EXPIRED":           "not_found",
+	"LINK_NOT_FOUND":            "not_found",
 	"FILES_UNAVAILABLE":         "not_found", // the files module is not running — retrying can't fix it
 	"AUDIT_UNAVAILABLE":         "not_found", // file writes need audit history and none is running
+	"FILES_MIGRATING":           "internal",  // uploads paused while files move to a new store — retry shortly
 	// conflict
 	"FK_VIOLATION":       "conflict",
 	"MODEL_BUSY":         "conflict",
