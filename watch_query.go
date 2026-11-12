@@ -67,6 +67,11 @@ func (c *Client) WatchSqlTemplate(ctx context.Context, template string, params [
 		trigger:  make(chan WatchEvent, 1),
 	}
 	go stw.drain()
+	if err := waitSubscribed(ctx, w); err != nil {
+		stw.Close()
+		return nil, err
+	}
+	stw.refresh(WatchEvent{})
 	go stw.refreshLoop()
 	if ctx != nil {
 		go func() {
@@ -260,6 +265,10 @@ func (c *Client) newQueryWatch(ctx context.Context, kind, entity string, args Ar
 	}
 	qw.watch = w
 	go qw.drain()
+	if err := qw.settle(ctx); err != nil {
+		qw.Close()
+		return nil, err
+	}
 	go qw.refreshLoop()
 	if ctx != nil {
 		go func() {
@@ -271,6 +280,29 @@ func (c *Client) newQueryWatch(ctx context.Context, kind, entity string, args Ar
 		}()
 	}
 	return qw, nil
+}
+
+// waitSubscribed blocks until the engine holds w's subscription (or it failed), or ctx ends.
+func waitSubscribed(ctx context.Context, w *WatchHandle) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-w.Subscribed():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// settle waits for the subscription, then refetches once: a write between the
+// snapshot and the subscription sent no event.
+func (q *QueryWatch) settle(ctx context.Context) error {
+	if err := waitSubscribed(ctx, q.watch); err != nil {
+		return err
+	}
+	q.refresh(WatchEvent{})
+	return nil
 }
 
 // Initial returns the first snapshot of rows.

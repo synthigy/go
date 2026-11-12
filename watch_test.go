@@ -133,16 +133,39 @@ func TestWatchSqlTemplateRefreshesOnTouch(t *testing.T) {
 	}
 	defer tile.Close()
 
-	if tile.First()["n"].(float64) != 1 {
-		t.Fatalf("initial first = %v, want 1", tile.First())
+	if tile.First()["n"].(float64) != 2 {
+		t.Fatalf("first after open = %v, want 2 (snapshot, then one refetch once subscribed)", tile.First())
 	}
 
-	select {
-	case ev := <-tile.Events():
-		if ev.Type != "result/changed" {
-			t.Fatalf("unexpected event: %+v", ev)
+	for {
+		select {
+		case ev := <-tile.Events():
+			if ev.Type != "result/changed" {
+				t.Fatalf("unexpected event: %+v", ev)
+			}
+			if tile.First()["n"].(float64) >= 3 {
+				return
+			}
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the touch to refresh the result")
 		}
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for result/changed")
+	}
+}
+
+func TestWatchKeepsEventsBeforeTheFirstEventsCall(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) }))
+	w, err := c.Watch(context.Background(), WatchInterest{Records: []string{"A"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	w.push(WatchEvent{Type: "record/update", Record: "A"})
+	select {
+	case ev := <-w.Events():
+		if ev.Type != "record/update" || ev.Record != "A" {
+			t.Fatalf("got %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an event pushed before Events() was lost")
 	}
 }

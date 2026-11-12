@@ -17,7 +17,7 @@ func TestPascal(t *testing.T) {
 		{"music album", "MusicAlbum"},
 		{"MusicAlbum", "MusicAlbum"},
 		{"_meta", "Meta"}, // via leading-underscore split
-		{"", "X"},           // empty → placeholder
+		{"", "X"},         // empty → placeholder
 	}
 	for _, tc := range cases {
 		if got := pascal(tc.in); got != tc.want {

@@ -117,7 +117,7 @@ func OpDescribeFiles(files []DescribeFile) Op { return Op{"op": "describe", "sou
 func (c *Client) Exec(ctx context.Context, ops []Op, opts ...Opt) ([]OpResult, error) {
 	o := applyOpts(opts)
 	body := map[string]any{"operations": ops}
-	if actingAs := firstNonEmpty(o.actingAs, c.defaultActingAs); actingAs != "" {
+	if actingAs := o.actingAs; actingAs != "" {
 		body["acting_as"] = actingAs
 	}
 	if kf := firstNonEmpty(o.keyFormat, c.defaultKeyFormat); kf != "" {

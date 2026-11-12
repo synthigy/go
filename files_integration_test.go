@@ -5,7 +5,7 @@
 // SYNTHIGY_FILES_TEST_ENDPOINT is set.
 //
 //	SYNTHIGY_FILES_TEST_ENDPOINT
-//	SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET}
+//	SYNTHIGY_FILES_TEST_{ADMIN,USER,READER,BFF}_{ID,SECRET} (BFF: trusted, File Admin)
 //
 //	go test -tags integration -run TestFilesLive -count=1 .
 package synthigy
@@ -112,7 +112,8 @@ func TestFilesLive(t *testing.T) {
 	admin := filesLiveClient(t, "ADMIN")
 	user := filesLiveClient(t, "USER")
 	reader := filesLiveClient(t, "READER")
-	af, uf, rf := admin.Files(), user.Files(), reader.Files()
+	bff := filesLiveClient(t, "BFF")
+	af, uf, rf, bf := admin.Files(), user.Files(), reader.Files(), bff.Files()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -340,6 +341,28 @@ func TestFilesLive(t *testing.T) {
 	expectFilesErr(t, "reader put", err, "FORBIDDEN", "iam")
 	_, err = rf.Folder(ctx, top+"r-"+run+"/")
 	expectFilesErr(t, "reader folder", err, "FORBIDDEN", "iam")
+
+	// 4b. a trusted client acting as the user and the reader.
+	if fi, err := bf.Info(ctx, loose.XID); err != nil || fi == nil {
+		t.Fatalf("bff as itself does not see loose: %v", err)
+	}
+	if fi, err := bf.Info(ctx, loose.XID, ActingAs(readerMe.XID)); err != nil || fi != nil {
+		t.Fatalf("bff acting as reader sees loose: %+v, %v", fi, err)
+	}
+	if b, _ := readDownload(t, "bff download as reader", bf, first.XID, ActingAs(readerMe.XID)); !bytes.Equal(b, bin) {
+		t.Fatalf("bff download as reader = %x", b)
+	}
+	_, err = bf.Put(ctx, top+"bff-r-"+run+".bin", bytes.NewReader(bin), ActingAs(readerMe.XID))
+	expectFilesErr(t, "bff put as reader", err, "FORBIDDEN", "iam")
+	own, err := bf.Put(ctx, top+"bff-u-"+run+".bin", bytes.NewReader(bin), ActingAs(userMe.XID))
+	if err != nil || own.UploadedBy == nil || own.UploadedBy.XID != userMe.XID {
+		t.Fatalf("bff put as user: %+v, %v", own, err)
+	}
+	if err := bf.Delete(ctx, own.XID, ActingAs(userMe.XID)); err != nil {
+		t.Fatalf("bff delete as user: %v", err)
+	}
+	_, err = af.Info(ctx, first.XID, ActingAs(readerMe.XID))
+	expectFilesErr(t, "untrusted client acting", err, "NOT_TRUSTED", "")
 
 	// 5. links for browsers.
 	notePath := top + "note-" + run + ".txt"

@@ -14,9 +14,9 @@ package synthigy
 // Fields(...) is a shorthand for a flat scalar list.
 type Selection map[string]any
 
-// Args holds query arguments for a read op: _where, _limit, _offset,
-// _order_by, _distinct, plus shorthand field conditions
-// (e.g. {"active": Eq(true)}).
+// Args holds query arguments for a read op: field conditions
+// (e.g. {"active": Eq(true)}) plus _and, _or, _not, _limit, _offset,
+// _order_by, _distinct.
 type Args map[string]any
 
 // RelationConfig configures a relation selection with optional args and

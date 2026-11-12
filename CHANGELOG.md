@@ -3,6 +3,29 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.3.0
+
+Needs engine v0.5.0 or later.
+
+### Breaking
+- **`Config.ActingAs` is gone.** The client runs as itself; a call acts as a
+  user only with the `ActingAs(xid)` option.
+
+### Added
+- **Acting as a user on files.** `ActingAs(xid)` on every `Files()` call (`Put`, `PutNew`, `Download`, `Zip`,
+  `Info`, `List`, `Search`, `Delete`, `Move`, `Folder`, `Share`, `Unshare`,
+  `Access`, `Versions`, `Restore`, `Link`, `Links`, `Unlink`, `Serve`); sent as
+  `X-Acting-As`. Methods that took no options now take `opts ...Opt`.
+  A trusted BFF works on files as the user, like `/data`.
+
+### Fixed
+- A write right after `WatchQuery` / `WatchQueryXSQL` / `WatchSqlTemplate`
+  returned could be missed: they returned before the engine held the
+  subscription. They now wait for it and refetch once. New
+  `WatchHandle.Subscribed()`.
+- Events that reached a `Watch` before its first `Events()` call were dropped (no
+  listener yet). The handle now buffers from the start and the first `Events()`
+  call gets that buffer.
 ## 0.2.4
 
 Needs an engine with `POST /files/zip` (after v0.4.1).

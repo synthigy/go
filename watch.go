@@ -207,6 +207,11 @@ func (m *watchMultiplexer) flush(ctx context.Context) {
 		watches = append(watches, w)
 	}
 	m.mu.Unlock()
+	defer func() {
+		for _, w := range watches {
+			w.markSubscribed()
+		}
+	}()
 
 	records := map[string]struct{}{}
 	entities := map[string]struct{}{}
@@ -293,6 +298,15 @@ func (m *watchMultiplexer) runSSE() {
 		default:
 			m.dispatch(ev)
 		}
+	}
+	m.mu.Lock()
+	waiting := make([]*WatchHandle, 0, len(m.watches))
+	for w := range m.watches {
+		waiting = append(waiting, w)
+	}
+	m.mu.Unlock()
+	for _, w := range waiting {
+		w.markSubscribed()
 	}
 }
 
@@ -439,7 +453,20 @@ type WatchHandle struct {
 	intr   WatchInterest
 	closed bool
 	sinks  map[*coalesceBuffer]struct{}
+
+	subscribed     chan struct{}
+	subscribedOnce sync.Once
+
+	// first buffers from construction; the first Events() call takes it, so
+	// events that land before anyone listens are not lost.
+	first *coalesceBuffer
 }
+
+// Subscribed is closed once the engine holds a subscription covering this
+// watch, or the attempt failed (a subscription/rejected event says so).
+func (w *WatchHandle) Subscribed() <-chan struct{} { return w.subscribed }
+
+func (w *WatchHandle) markSubscribed() { w.subscribedOnce.Do(func() { close(w.subscribed) }) }
 
 // Watch opens a live subscription. The interest fuses onto the client's
 // shared SSE + subscription POST. Cancel via ctx or Watch.Close.
@@ -449,7 +476,9 @@ func (c *Client) Watch(ctx context.Context, interest WatchInterest, opts ...Opt)
 		return nil, err
 	}
 	mux := c.getMultiplexer()
-	w := &WatchHandle{mux: mux, intr: ni, sinks: map[*coalesceBuffer]struct{}{}}
+	w := &WatchHandle{mux: mux, intr: ni, sinks: map[*coalesceBuffer]struct{}{}, subscribed: make(chan struct{})}
+	w.first = newCoalesceBuffer("coalesce", 100)
+	w.sinks[w.first] = struct{}{}
 	mux.register(w)
 	if ctx != nil {
 		go func() {
@@ -467,6 +496,13 @@ func (c *Client) Watch(ctx context.Context, interest WatchInterest, opts ...Opt)
 // same "consumers live for the handle's lifetime" contract the other SDKs
 // accept when a caller doesn't explicitly tear down its own iterator.
 func (w *WatchHandle) Events() <-chan WatchEvent {
+	w.mu.Lock()
+	if first := w.first; first != nil {
+		w.first = nil
+		w.mu.Unlock()
+		return first.out
+	}
+	w.mu.Unlock()
 	buf := newCoalesceBuffer("coalesce", 100)
 	w.mu.Lock()
 	if w.closed {
@@ -548,6 +584,7 @@ func (w *WatchHandle) Close() {
 		return
 	}
 	w.closed = true
+	w.markSubscribed()
 	sinks := make([]*coalesceBuffer, 0, len(w.sinks))
 	for buf := range w.sinks {
 		sinks = append(sinks, buf)

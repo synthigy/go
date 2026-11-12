@@ -42,10 +42,6 @@ type Config struct {
 	// all it returns a *Error{Code: "NO_TOKEN"} whose message teaches the
 	// fix.
 
-	// ActingAs is a default impersonation target applied to every request
-	// unless overridden per call.
-	ActingAs string
-
 	// KeyFormat is the default response key-case ("kebab", "snake", "camel").
 	// The server defaults to snake_case when empty.
 	KeyFormat string
@@ -76,7 +72,6 @@ type Config struct {
 type Client struct {
 	endpoint         string
 	dataURL          string
-	defaultActingAs  string
 	defaultKeyFormat string
 	defaultAudience  string
 	timeout          time.Duration
@@ -131,7 +126,6 @@ func newClient(cfg Config) (*Client, error) {
 	c := &Client{
 		endpoint:         endpoint,
 		dataURL:          endpoint + "/data",
-		defaultActingAs:  cfg.ActingAs,
 		defaultKeyFormat: cfg.KeyFormat,
 		defaultAudience:  cfg.Audience,
 		timeout:          cfg.Timeout,

@@ -439,9 +439,9 @@ Set `SYNTHIGY_ENDPOINT` plus `SYNTHIGY_CLIENT_ID`/`SYNTHIGY_CLIENT_SECRET` (or
 `SYNTHIGY_TOKEN`) for integration tests, and
 `SYNTHIGY_TEST_LOGIN_CLIENT_ID`/`_SECRET`/`_USER`/`_PASSWORD` for the headless
 browser-login test. The live files suite (`go test -tags integration -run TestFilesLive .`)
-needs `SYNTHIGY_FILES_TEST_ENDPOINT` plus `SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET}`:
-three client-credentials clients whose service users hold File Admin, File User and
-File Reader; it skips without the endpoint. Runnable services live in
+needs `SYNTHIGY_FILES_TEST_ENDPOINT` plus `SYNTHIGY_FILES_TEST_{ADMIN,USER,READER,BFF}_{ID,SECRET}`:
+client-credentials clients whose service users hold File Admin, File User and
+File Reader, plus a trusted File Admin client (BFF) that acts as the others; it skips without the endpoint. Runnable services live in
 [synthigy/examples](https://github.com/synthigy/examples): `movies/go` for the
 smallest shape, `rls-demo/go` for the access-control BFF.
 ```

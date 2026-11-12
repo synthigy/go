@@ -200,6 +200,16 @@ func folderAt(ref, tail string) (string, url.Values) {
 	return "/folders" + xidPath(ref) + tail, nil
 }
 
+type actingAsKey struct{}
+
+// actingCtx carries the ActingAs user of opts to send, which puts it on X-Acting-As.
+func actingCtx(ctx context.Context, opts []Opt) context.Context {
+	if as := applyOpts(opts).actingAs; as != "" {
+		return context.WithValue(ctx, actingAsKey{}, as)
+	}
+	return ctx
+}
+
 // xidAt is the xid of a file named by path or xid; versions take only an xid.
 func (f *FilesAPI) xidAt(ctx context.Context, ref string) (string, error) {
 	if !isPath(ref) {
@@ -222,6 +232,14 @@ func (f *FilesAPI) xidAt(ctx context.Context, ref string) (string, error) {
 func (f *FilesAPI) send(ctx context.Context, method, urlStr string, body io.Reader,
 	headers map[string]string, timeout bool) (*http.Response, error) {
 
+	if as, _ := ctx.Value(actingAsKey{}).(string); as != "" {
+		h := make(map[string]string, len(headers)+1)
+		for k, v := range headers {
+			h[k] = v
+		}
+		h["X-Acting-As"] = as
+		headers = h
+	}
 	resp, err := f.c.fetchAuthBody(ctx, method, urlStr, body, headers, timeout)
 	if err != nil {
 		return nil, err
@@ -303,6 +321,7 @@ func (f *FilesAPI) write(ctx context.Context, method, path string, q url.Values,
 // IfMatch. Body is read to the end and not closed; an io.Seeker body
 // survives a token refresh mid-call.
 func (f *FilesAPI) Put(ctx context.Context, target string, body io.Reader, opts ...Opt) (*FileInfo, error) {
+	ctx = actingCtx(ctx, opts)
 	if target == "" {
 		return nil, newError("put takes a path or an xid; PutNew makes a file in no folder", "INVALID_PATH")
 	}
@@ -313,6 +332,7 @@ func (f *FilesAPI) Put(ctx context.Context, target string, body io.Reader, opts 
 // PutNew stores body as a new file called name in no folder; a second call
 // makes another file.
 func (f *FilesAPI) PutNew(ctx context.Context, name string, body io.Reader, opts ...Opt) (*FileInfo, error) {
+	ctx = actingCtx(ctx, opts)
 	if name == "" {
 		return nil, newError("PutNew needs a name", "NAME_REQUIRED")
 	}
@@ -333,6 +353,7 @@ func rangeHeader(r [2]int64) string {
 // Download opens the bytes of a file. Use ByteRange, IfNoneMatch and
 // AtVersion. Bound by ctx alone, not the client Timeout. The caller closes Body.
 func (f *FilesAPI) Download(ctx context.Context, ref string, opts ...Opt) (*FileDownload, error) {
+	ctx = actingCtx(ctx, opts)
 	o := applyOpts(opts)
 	h := map[string]string{}
 	if o.byteRange != nil {
@@ -373,7 +394,8 @@ func (f *FilesAPI) Download(ctx context.Context, ref string, opts ...Opt) (*File
 // Zip streams one zip of files and of everything inside folders (xids or
 // paths), read as you; what you cannot read is listed in its _skipped.txt.
 // Like every file transfer it is bound by ctx alone. The caller closes Body.
-func (f *FilesAPI) Zip(ctx context.Context, files, folders []string) (*FileDownload, error) {
+func (f *FilesAPI) Zip(ctx context.Context, files, folders []string, opts ...Opt) (*FileDownload, error) {
+	ctx = actingCtx(ctx, opts)
 	if files == nil {
 		files = []string{}
 	}
@@ -390,7 +412,8 @@ func (f *FilesAPI) Zip(ctx context.Context, files, folders []string) (*FileDownl
 }
 
 // Info returns the file, or nil when it is not there or you cannot see it.
-func (f *FilesAPI) Info(ctx context.Context, ref string) (*FileInfo, error) {
+func (f *FilesAPI) Info(ctx context.Context, ref string, opts ...Opt) (*FileInfo, error) {
+	ctx = actingCtx(ctx, opts)
 	var out FileInfo
 	path, q := fileAt(ref, "/info")
 	if err := f.json(ctx, http.MethodGet, path, q, nil, &out); err != nil {
@@ -407,6 +430,7 @@ func (f *FilesAPI) Info(ctx context.Context, ref string) (*FileInfo, error) {
 // can see, newest first. Query keeps names holding its words in order;
 // Limit (default 100, at most 1000) and Offset page the files.
 func (f *FilesAPI) List(ctx context.Context, opts ...Opt) (*Listing, error) {
+	ctx = actingCtx(ctx, opts)
 	o := applyOpts(opts)
 	q := url.Values{}
 	if o.fileQuery != "" {
@@ -462,6 +486,7 @@ func holdsInOrder(s string, words []string) bool {
 // Search returns folders and files whose paths hold the words of q in order,
 // shortest path first. InFolder keeps it below that folder; Limit and Offset page.
 func (f *FilesAPI) Search(ctx context.Context, q string, opts ...Opt) (*SearchResults, error) {
+	ctx = actingCtx(ctx, opts)
 	o := applyOpts(opts)
 	v := url.Values{"q": {q}}
 	if o.folder != "" {
@@ -482,7 +507,8 @@ func (f *FilesAPI) Search(ctx context.Context, q string, opts ...Opt) (*SearchRe
 
 // Delete deletes a file, or an empty folder (a path ending in /). A file's
 // bytes are kept for the grace period.
-func (f *FilesAPI) Delete(ctx context.Context, ref string) error {
+func (f *FilesAPI) Delete(ctx context.Context, ref string, opts ...Opt) error {
+	ctx = actingCtx(ctx, opts)
 	path, q := fileAt(ref, "")
 	if isFolderPath(ref) {
 		path, q = folderAt(ref, "")
@@ -517,7 +543,8 @@ func (f *FilesAPI) URL(ref string, opts ...Opt) string {
 // Move renames or moves. A file goes to to ("/a/new.png"), or into a folder
 // when to ends in / (the name stays); a folder (from ending in /) moves to
 // its new path. One of the answers is set: the file or the folder.
-func (f *FilesAPI) Move(ctx context.Context, from, to string) (*FileInfo, *Folder, error) {
+func (f *FilesAPI) Move(ctx context.Context, from, to string, opts ...Opt) (*FileInfo, *Folder, error) {
+	ctx = actingCtx(ctx, opts)
 	if !isPath(to) {
 		return nil, nil, newError("move takes the new path, for example /site/brand/logo.png", "INVALID_PATH")
 	}
@@ -553,6 +580,7 @@ func (f *FilesAPI) Move(ctx context.Context, from, to string) (*FileInfo, *Folde
 // Folder returns the folder at path, made with every missing folder above
 // it. SetPublic, SetCache, SetCanLink and their Inherit forms change its settings.
 func (f *FilesAPI) Folder(ctx context.Context, path string, opts ...Opt) (*Folder, error) {
+	ctx = actingCtx(ctx, opts)
 	settings := applyOpts(opts).folderSettings
 	if settings == nil {
 		settings = map[string]any{}
@@ -577,17 +605,20 @@ func (f *FilesAPI) share(ctx context.Context, folder, tail, access string, users
 
 // Share gives users and groups (xids) access ("read", "write" or "delete")
 // on a folder; writers of the folder may.
-func (f *FilesAPI) Share(ctx context.Context, folder, access string, users, groups []string) error {
+func (f *FilesAPI) Share(ctx context.Context, folder, access string, users, groups []string, opts ...Opt) error {
+	ctx = actingCtx(ctx, opts)
 	return f.share(ctx, folder, "/share", access, users, groups)
 }
 
 // Unshare takes access away from users and groups on a folder.
-func (f *FilesAPI) Unshare(ctx context.Context, folder, access string, users, groups []string) error {
+func (f *FilesAPI) Unshare(ctx context.Context, folder, access string, users, groups []string, opts ...Opt) error {
+	ctx = actingCtx(ctx, opts)
 	return f.share(ctx, folder, "/unshare", access, users, groups)
 }
 
 // Access returns who holds read, write and delete on a folder.
-func (f *FilesAPI) Access(ctx context.Context, folder string) (*FolderAccess, error) {
+func (f *FilesAPI) Access(ctx context.Context, folder string, opts ...Opt) (*FolderAccess, error) {
+	ctx = actingCtx(ctx, opts)
 	var out FolderAccess
 	path, q := folderAt(folder, "/access")
 	if err := f.json(ctx, http.MethodGet, path, q, nil, &out); err != nil {
@@ -597,7 +628,8 @@ func (f *FilesAPI) Access(ctx context.Context, folder string) (*FolderAccess, er
 }
 
 // Versions returns the kept versions of a file (the last ten), newest first.
-func (f *FilesAPI) Versions(ctx context.Context, ref string) ([]FileVersion, error) {
+func (f *FilesAPI) Versions(ctx context.Context, ref string, opts ...Opt) ([]FileVersion, error) {
+	ctx = actingCtx(ctx, opts)
 	xid, err := f.xidAt(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -612,7 +644,8 @@ func (f *FilesAPI) Versions(ctx context.Context, ref string) ([]FileVersion, err
 }
 
 // Restore makes kept version id of a file current again; no bytes are copied.
-func (f *FilesAPI) Restore(ctx context.Context, ref string, id int64) (*FileInfo, error) {
+func (f *FilesAPI) Restore(ctx context.Context, ref string, id int64, opts ...Opt) (*FileInfo, error) {
+	ctx = actingCtx(ctx, opts)
 	xid, err := f.xidAt(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -627,6 +660,7 @@ func (f *FilesAPI) Restore(ctx context.Context, ref string, id int64) (*FileInfo
 // Link makes a download link for a file in a folder where links are on. Use
 // LinkExpires, LinkMaxDownloads and Inline. Its URL is shown only now.
 func (f *FilesAPI) Link(ctx context.Context, ref string, opts ...Opt) (*FileLink, error) {
+	ctx = actingCtx(ctx, opts)
 	xid, err := f.xidAt(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -651,7 +685,8 @@ func (f *FilesAPI) Link(ctx context.Context, ref string, opts ...Opt) (*FileLink
 
 // Links returns the file's live links you can see: your own, or all of them
 // for File Admin.
-func (f *FilesAPI) Links(ctx context.Context, ref string) ([]FileLink, error) {
+func (f *FilesAPI) Links(ctx context.Context, ref string, opts ...Opt) ([]FileLink, error) {
+	ctx = actingCtx(ctx, opts)
 	xid, err := f.xidAt(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -666,7 +701,8 @@ func (f *FilesAPI) Links(ctx context.Context, ref string) ([]FileLink, error) {
 }
 
 // Unlink ends a link (its xid) at once, on every engine.
-func (f *FilesAPI) Unlink(ctx context.Context, link string) error {
+func (f *FilesAPI) Unlink(ctx context.Context, link string, opts ...Opt) error {
+	ctx = actingCtx(ctx, opts)
 	return f.json(ctx, http.MethodDelete, "/links"+xidPath(link), nil, nil, nil)
 }
 
@@ -684,6 +720,9 @@ func (f *FilesAPI) Serve(w http.ResponseWriter, r *http.Request, ref string, opt
 		if v := r.Header.Get(k); v != "" {
 			h[k] = v
 		}
+	}
+	if as := applyOpts(opts).actingAs; as != "" {
+		h["X-Acting-As"] = as
 	}
 	path, q := fileAt(ref, "")
 	if applyOpts(opts).inline {

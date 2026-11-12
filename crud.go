@@ -41,7 +41,7 @@ func (c *Client) Get(ctx context.Context, entity string, args Args, sel Selectio
 //	// → row["cast"] == 11, row["votes"] == 4, row["rating"] == 4.25
 //
 // "op" is "count" or {fn: field} with fn sum, avg, min, max or count_distinct;
-// "args" ({"_where": …}) filters the counted rows. Entries mix with
+// "args" ({"verified": Eq(true)}) filters the counted rows. Entries mix with
 // Rel(...) configs in the same array. For aggregation that is NOT a relation
 // rollup (totals across an entity, cross-entity joins, window functions,
 // etc.) use SQLTemplate.

@@ -506,3 +506,56 @@ func TestFilesKeyFormatStaysSnake(t *testing.T) {
 		t.Fatalf("info = %+v, %v, queries %q", fi, err, queries)
 	}
 }
+
+func TestFilesActingAs(t *testing.T) {
+	var seen []string
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path+" as="+r.Header.Get("X-Acting-As"))
+		writeJSON(w, 200, map[string]any{"xid": "XXXXXXXXXXXXXXXXXXXXXX", "name": "b.txt",
+			"files": []any{}, "folders": []any{}, "versions": []any{}, "links": []any{}})
+	}))
+	ctx := context.Background()
+	fs := c.Files()
+	run := func(o ...Opt) {
+		_, _ = fs.Put(ctx, "/a/b.txt", strings.NewReader("x"), o...)
+		_, _ = fs.PutNew(ctx, "b.txt", strings.NewReader("x"), o...)
+		if d, err := fs.Download(ctx, "/a/b.txt", append(o, AtVersion(1))...); err == nil {
+			d.Body.Close()
+		}
+		if d, err := fs.Zip(ctx, []string{"/a/b.txt"}, nil, o...); err == nil {
+			d.Body.Close()
+		}
+		_, _ = fs.Info(ctx, "/a/b.txt", o...)
+		_, _ = fs.List(ctx, append(o, InFolder("/a/"))...)
+		_, _ = fs.Search(ctx, "q", o...)
+		_ = fs.Delete(ctx, "/a/b.txt", o...)
+		_, _, _ = fs.Move(ctx, "/a/b.txt", "/c/", o...)
+		_, _ = fs.Folder(ctx, "/a/", o...)
+		_ = fs.Share(ctx, "/a/", "read", []string{"u"}, nil, o...)
+		_ = fs.Unshare(ctx, "/a/", "read", []string{"u"}, nil, o...)
+		_, _ = fs.Access(ctx, "/a/", o...)
+		_, _ = fs.Versions(ctx, "/a/b.txt", o...)
+		_, _ = fs.Restore(ctx, "/a/b.txt", 1, o...)
+		_, _ = fs.Link(ctx, "/a/b.txt", o...)
+		_, _ = fs.Links(ctx, "/a/b.txt", o...)
+		_ = fs.Unlink(ctx, "LLLLLLLLLLLLLLLLLLLLLL", o...)
+		fs.Serve(httptest.NewRecorder(), httptest.NewRequest("GET", "/x", nil), "/a/b.txt", o...)
+	}
+
+	run(ActingAs("U1"))
+	if len(seen) < 19 {
+		t.Fatalf("only %d requests", len(seen))
+	}
+	for _, s := range seen {
+		if !strings.HasSuffix(s, " as=U1") {
+			t.Errorf("missing X-Acting-As: %s", s)
+		}
+	}
+	seen = nil
+	run()
+	for _, s := range seen {
+		if !strings.HasSuffix(s, " as=") {
+			t.Errorf("X-Acting-As without ActingAs: %s", s)
+		}
+	}
+}
