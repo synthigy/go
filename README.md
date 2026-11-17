@@ -237,7 +237,9 @@ Errors are `*synthigy.Error` (use `errors.As`); inspect `.Code`, `.Category`
 (`auth`/`iam`/`validation`/`not_found`/`conflict`/`rate_limit`/`network`/`internal`),
 and `.Retryable` — true for `network`, `rate_limit` and `internal` codes and for
 errors the server marks retryable. A code this SDK doesn't know yet is
-`internal` but not retryable.
+`internal` but not retryable. When the engine sends them, `.Rule` names the
+rule that refused, `.Doc` its manual section (read at `GET /docs/<Doc>`) and
+`.Attribute` the attribute the refusal is about.
 
 | Method | Purpose |
 |---|---|
@@ -317,7 +319,7 @@ ls, _ := fs.List(ctx, synthigy.InFolder("/site/"))    // ls.Files, ls.Folders; N
 hits, _ := fs.Search(ctx, "site logo")                 // paths holding the words in order, shortest first
 fs.Move(ctx, "/site/img/logo.png", "/brand/")          // keeps the name; never overwrites
 fs.Move(ctx, "/site/img/", "/assets/img/")             // a folder
-vs, _ := fs.Versions(ctx, fi.XID)                      // the last ten, newest first
+vs, _ := fs.Versions(ctx, fi.XID)                      // the last 100, newest first
 fs.Restore(ctx, fi.XID, vs[1].ID)
 z, _ := fs.Zip(ctx, []string{"/notes/today.txt"}, []string{"/site/img/"}) // streamed; close z.Body
 fs.Share(ctx, "/site/", "read", []string{userXID}, nil)

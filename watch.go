@@ -26,8 +26,9 @@ type WatchInterest struct {
 
 // WatchEvent is a shaped, multiplexed live event. Sentinels
 // (subscription/rejected, connection/resumed, schema/changed) carry only
-// Type and (for rejections) Reason. Raw holds the full source envelope for
-// data events.
+// Type and, for rejections, Reason and Err, the error the refused call
+// returned (an *Error for an engine refusal). Raw holds the full source
+// envelope for data events.
 type WatchEvent struct {
 	Type     string
 	Record   string
@@ -44,6 +45,7 @@ type WatchEvent struct {
 	Entity   string
 	Relation string
 	Reason   string
+	Err      error
 	Raw      map[string]any
 }
 
@@ -265,7 +267,7 @@ func (m *watchMultiplexer) flush(ctx context.Context) {
 	m.mu.Unlock()
 
 	if err := m.client.setSubscriptionsItems(ctx, items); err != nil {
-		m.fanOutSentinel(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err)})
+		m.fanOutSentinel(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err), Err: err})
 	}
 }
 

@@ -122,11 +122,8 @@ func (c *Client) OnboardComplete(ctx context.Context, ticket string, opts ...Opt
 	return &out, nil
 }
 
-// onboardError maps a non-2xx /oauth/onboard body to an *Error. The wire
-// shape here is {"error": "<snake_case_code>"} — a bare string, unlike the
-// {error:{code,message}} envelope /data uses — so it can't go through
-// httpError/parseServerError; those expect an object and will silently miss
-// the code on a type mismatch.
+// onboardError maps a non-2xx /oauth/onboard body to an *Error: a bare
+// string code, unless the server sent its error object.
 func onboardError(raw []byte, status int) *Error {
 	var env struct {
 		Error string `json:"error"`
@@ -137,8 +134,5 @@ func onboardError(raw []byte, status int) *Error {
 		e.Status = status
 		return e
 	}
-	e := newError("onboard request failed", "HTTP_ERROR")
-	e.Status = status
-	e.Details = string(raw)
-	return e
+	return httpError(raw, status, "onboard request failed")
 }

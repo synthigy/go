@@ -38,6 +38,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
@@ -196,6 +197,26 @@ func main() {
 	emit(irPath, schemaPath, filepath.Join(*outDir, "generated.go"), name)
 }
 
+// describeFailure is a failed describe as the codegen prints it: code and
+// message, then the position, hint and manual section the engine sent.
+func describeFailure(endpoint, code, message, hint, doc string, line, col int) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "describe failed: %s: %s", code, message)
+	if line > 0 {
+		fmt.Fprintf(&b, "\n  at line %d", line)
+		if col > 0 {
+			fmt.Fprintf(&b, ", col %d", col)
+		}
+	}
+	if hint != "" {
+		fmt.Fprintf(&b, "\n  hint: %s", hint)
+	}
+	if doc != "" {
+		fmt.Fprintf(&b, "\n  docs: %s/docs/%s", strings.TrimRight(endpoint, "/"), doc)
+	}
+	return errors.New(b.String())
+}
+
 // doPull fetches the IAM-filtered schema (GET /schema) and describes every
 // .xsql in xsqlDir into the op IR (POST /data describe), writing both snapshots
 // next to the .xsql source. All native — the Go SDK owns auth + HTTP.
@@ -232,6 +253,10 @@ func doPull(endpoint, xsqlDir, schemaPath, irPath string) error {
 	}
 	res, err := c.Exec(ctx, []synthigy.Op{synthigy.OpDescribeFiles(files)})
 	if err != nil {
+		var se *synthigy.Error
+		if errors.As(err, &se) {
+			return describeFailure(endpoint, se.Code, se.Message, se.Hint, se.Doc, se.Line, se.Col)
+		}
 		return fmt.Errorf("describe: %w", err)
 	}
 	if len(res) == 0 {
@@ -239,7 +264,7 @@ func doPull(endpoint, xsqlDir, schemaPath, irPath string) error {
 	}
 	if !res[0].OK {
 		if e := res[0].Error; e != nil {
-			return fmt.Errorf("describe: %s (%s)", e.Message, e.Code)
+			return describeFailure(endpoint, e.Code, e.Message, e.Hint, e.Doc, e.Line, e.Col)
 		}
 		return fmt.Errorf("describe failed with no error detail")
 	}

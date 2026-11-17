@@ -97,6 +97,32 @@ func TestOnboardUnknownXIDMapsToError(t *testing.T) {
 	}
 }
 
+func TestOnboardErrorObjectKeepsServerFields(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+			"message": "oauth is not loaded", "code": "MODULE_NOT_LOADED",
+			"hint": "h", "rule": "stamp", "doc": "errors/stamp"}})
+	}))
+	for name, call := range map[string]func() error{
+		"onboard":          func() error { _, err := c.Onboard(context.Background(), "user-xid-1"); return err },
+		"onboard-complete": func() error { _, err := c.OnboardComplete(context.Background(), "t"); return err },
+	} {
+		err := call()
+		se, ok := err.(*Error)
+		if !ok {
+			t.Fatalf("%s: expected *Error, got %T (%v)", name, err, err)
+		}
+		got := []any{se.Message, se.Code, se.Hint, se.Rule, se.Doc, se.Status}
+		want := []any{"oauth is not loaded", "MODULE_NOT_LOADED", "h", "stamp", "errors/stamp", 503}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s: message, code, hint, rule, doc, status = %v, want %v", name, got, want)
+			}
+		}
+	}
+}
+
 func TestOnboardNonJSONErrorBodyDoesNotCrash(t *testing.T) {
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

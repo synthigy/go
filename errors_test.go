@@ -2,10 +2,13 @@ package synthigy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
+	"time"
 )
 
 func TestErrorCategoryAndRetryable(t *testing.T) {
@@ -129,6 +132,137 @@ func TestErrorFromServerExtras(t *testing.T) {
 	}
 	if e.Category != "validation" {
 		t.Errorf("category = %q, want validation", e.Category)
+	}
+}
+
+var stampError = map[string]any{
+	"message": "'modified_by' is set by the system on Movie", "code": "ATTRIBUTE_FORBIDDEN",
+	"hint": "leave it out of data", "rule": "stamp", "doc": "errors/stamp",
+	"entity": "Movie", "attribute": "modified_by",
+}
+
+func keepsStamp(t *testing.T, where string, err error) {
+	t.Helper()
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("%s: expected *Error, got %v", where, err)
+	}
+	got := []string{e.Code, e.Hint, e.Rule, e.Doc, e.Entity, e.Attribute}
+	want := []string{"ATTRIBUTE_FORBIDDEN", "leave it out of data", "stamp", "errors/stamp", "Movie", "modified_by"}
+	if !slices.Equal(got, want) {
+		t.Errorf("%s: got %q, want %q", where, got, want)
+	}
+}
+
+// answering returns a client whose server answers every request with status and body.
+func answering(t *testing.T, status int, body any) *Client {
+	t.Helper()
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	return c
+}
+
+func TestErrorKeepsDocRuleAttribute(t *testing.T) {
+	top := map[string]any{"ok": false, "error": stampError}
+	for _, c := range []struct {
+		where  string
+		status int
+		body   any
+	}{
+		{"per-op", 200, map[string]any{"results": []any{map[string]any{"ok": false, "error": stampError}}}},
+		{"top-level", 200, top},
+		{"top-level 400", 400, top},
+		{"top-level 403", 403, top},
+	} {
+		_, err := answering(t, c.status, c.body).Sync(context.Background(), "movie", map[string]any{"modified_by": "x"})
+		keepsStamp(t, c.where, err)
+	}
+}
+
+func TestErrorWithoutDocRuleAttributeLeavesThemZeroAndOmitted(t *testing.T) {
+	notFound := map[string]any{"message": "Not found", "code": "NOT_FOUND"}
+	_, err := answering(t, 200, map[string]any{"results": []any{map[string]any{"ok": false, "error": notFound}}}).
+		Get(context.Background(), "movie", Args{"xid": "x"}, Selection{"title": nil})
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %v", err)
+	}
+	if e.Hint != "" || e.Rule != "" || e.Doc != "" || e.Attribute != "" {
+		t.Errorf("absent fields set: %+v", e)
+	}
+	raw, _ := json.Marshal(e)
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	for _, k := range []string{"hint", "rule", "doc", "attribute"} {
+		if _, has := m[k]; has {
+			t.Errorf("%s in JSON: %s", k, raw)
+		}
+	}
+}
+
+func TestEveryEndpointKeepsDocRuleAttribute(t *testing.T) {
+	ctx := context.Background()
+	refused := map[string]any{"error": stampError}
+	perOp := map[string]any{"results": []any{map[string]any{"ok": false, "error": stampError}}}
+	query := func(c *Client) (OpResult, error) {
+		rs, err := c.Exec(ctx, []Op{OpQuery("movie\n  title\n", nil, "")})
+		if err != nil {
+			return OpResult{}, err
+		}
+		return rs[0], nil
+	}
+	for _, c := range []struct {
+		where  string
+		status int
+		body   any
+		call   func(*Client) error
+	}{
+		{"schema", 400, refused, func(c *Client) error { _, err := c.Schema(ctx); return err }},
+		{"lint", 400, refused, func(c *Client) error { _, err := c.Lint(ctx, "movie\n  title\n"); return err }},
+		{"compile", 400, refused, func(c *Client) error { _, err := c.Compile(ctx, "movie\n  title\n", nil); return err }},
+		{"compile per-op", 200, perOp, func(c *Client) error { _, err := c.Compile(ctx, "movie\n  title\n", nil); return err }},
+		{"history", 400, refused, func(c *Client) error { _, err := c.History().Events(ctx, ""); return err }},
+		{"subscription set", 400, refused, func(c *Client) error { return c.ClearSubscriptions(ctx) }},
+		{"subscription status", 400, refused, func(c *Client) error { _, err := c.Subscriptions(ctx); return err }},
+		{"files", 400, refused, func(c *Client) error { _, err := c.Files().Info(ctx, "/site/logo.png"); return err }},
+		{"deploy", 200, perOp, func(c *Client) error { _, err := c.Deploy(ctx, "{}"); return err }},
+		{"ResultAs", 200, perOp, func(c *Client) error {
+			r, err := query(c)
+			if err != nil {
+				return err
+			}
+			_, err = ResultAs[map[string]any](r)
+			return err
+		}},
+		{"ResultOneAs", 200, perOp, func(c *Client) error {
+			r, err := query(c)
+			if err != nil {
+				return err
+			}
+			_, err = ResultOneAs[map[string]any](r)
+			return err
+		}},
+	} {
+		keepsStamp(t, c.where, c.call(answering(t, c.status, c.body)))
+	}
+
+	forbidden := map[string]any{}
+	for k, v := range stampError {
+		forbidden[k] = v
+	}
+	forbidden["code"] = "FORBIDDEN"
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	s := answering(t, 403, map[string]any{"error": forbidden}).Listen(lctx)
+	for range s.Events() {
+	}
+	var e *Error
+	if !errors.As(s.Err(), &e) || e.Code != "FORBIDDEN" || e.Status != 403 ||
+		e.Rule != "stamp" || e.Doc != "errors/stamp" || e.Attribute != "modified_by" {
+		t.Errorf("listen: got %+v", s.Err())
 	}
 }
 

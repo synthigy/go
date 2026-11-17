@@ -3,6 +3,7 @@ package synthigy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -168,4 +169,97 @@ func TestWatchKeepsEventsBeforeTheFirstEventsCall(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("an event pushed before Events() was lost")
 	}
+}
+
+var rejection = map[string]any{"message": "no", "code": "FORBIDDEN", "hint": "h", "rule": "stamp", "doc": "errors/stamp"}
+
+func nextRejected(t *testing.T, events <-chan WatchEvent) WatchEvent {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type == "subscription/rejected" {
+				return ev
+			}
+		case <-deadline:
+			t.Fatal("no subscription/rejected event")
+		}
+	}
+}
+
+func assertRejectionError(t *testing.T, ev WatchEvent) {
+	t.Helper()
+	var se *Error
+	if !errors.As(ev.Err, &se) {
+		t.Fatalf("Err = %#v, want *Error", ev.Err)
+	}
+	if ev.Reason != ev.Err.Error() {
+		t.Errorf("Reason = %q, want the error's message %q", ev.Reason, ev.Err.Error())
+	}
+	got := []string{se.Code, se.Hint, se.Rule, se.Doc}
+	want := []string{"FORBIDDEN", "h", "stamp", "errors/stamp"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("code, hint, rule, doc = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestWatchRejectedSubscribeCarriesTheError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/schema", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entities": map[string]any{}})
+	})
+	mux.HandleFunc("/data/subscription/set", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": rejection})
+	})
+	mux.HandleFunc("/data/events", blockingSSE(nil))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	w, err := c.Watch(ctx, WatchInterest{Records: []string{"r1"}})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Close()
+	assertRejectionError(t, nextRejected(t, w.Events()))
+}
+
+func TestWatchQueryRejectedRefreshCarriesTheError(t *testing.T) {
+	var dataCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/schema", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entities": map[string]any{}})
+	})
+	mux.HandleFunc("/data/subscription/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/data", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&dataCalls, 1) == 1 {
+			writeResults(w, []map[string]any{{"ok": true, "data": []map[string]any{{"xid": "m-1", "title": "A"}}}})
+			return
+		}
+		writeResults(w, []map[string]any{{"ok": false, "error": rejection}})
+	})
+	mux.HandleFunc("/data/events", blockingSSE(nil))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	qw, err := c.WatchQuery(ctx, "movie", nil, Selection{"title": nil})
+	if err != nil {
+		t.Fatalf("WatchQuery: %v", err)
+	}
+	defer qw.Close()
+	assertRejectionError(t, nextRejected(t, qw.Events()))
 }

@@ -189,15 +189,10 @@ func (c *Client) Deploy(ctx context.Context, exportContents string, opts ...Opt)
 // Destroy destroys a dataset — every version, table and row. Requires
 // dataset:delete. Idempotent.
 func (c *Client) Destroy(ctx context.Context, datasetXid string, opts ...Opt) (bool, error) {
-	r, err := c.execOne(ctx, OpDestroy(datasetXid), opts...)
-	if err != nil {
+	if _, err := c.execOne(ctx, OpDestroy(datasetXid), opts...); err != nil {
 		return false, err
 	}
-	var ok bool
-	if err := json.Unmarshal(r.Data, &ok); err != nil {
-		return false, newError("failed to decode destroy result: "+err.Error(), "INTERNAL_ERROR")
-	}
-	return ok, nil
+	return true, nil
 }
 
 // RuntimeModel fetches the runtime ERD model — the deployed model augmented

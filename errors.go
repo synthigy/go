@@ -178,6 +178,7 @@ type Error struct {
 	Available []string `json:"available,omitempty"`
 	Path      any      `json:"path,omitempty"`
 	Entity    string   `json:"entity,omitempty"`
+	Attribute string   `json:"attribute,omitempty"`
 	Relation  string   `json:"relation,omitempty"`
 	Operator  string   `json:"operator,omitempty"`
 	RequestID string   `json:"requestId,omitempty"`
@@ -189,6 +190,11 @@ type Error struct {
 	Start       *Pos  `json:"start,omitempty"`
 	End         *Pos  `json:"end,omitempty"`
 	Diagnostics []any `json:"diagnostics,omitempty"`
+
+	// Rule is the rule that refused; Doc is its manual section, e.g.
+	// "errors/relation_data", readable at GET /docs/errors/relation_data.
+	Rule string `json:"rule,omitempty"`
+	Doc  string `json:"doc,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -219,9 +225,12 @@ type serverError struct {
 	Code        string   `json:"code"`
 	Details     any      `json:"details"`
 	Hint        string   `json:"hint"`
+	Rule        string   `json:"rule"`
+	Doc         string   `json:"doc"`
 	Available   []string `json:"available"`
 	Path        any      `json:"path"`
 	Entity      string   `json:"entity"`
+	Attribute   string   `json:"attribute"`
 	Relation    string   `json:"relation"`
 	Operator    string   `json:"operator"`
 	Line        int      `json:"line"`
@@ -241,9 +250,12 @@ func errorFromServer(se *serverError, status int, requestID string) *Error {
 	e := newError(se.Message, se.Code)
 	e.Details = se.Details
 	e.Hint = se.Hint
+	e.Rule = se.Rule
+	e.Doc = se.Doc
 	e.Available = se.Available
 	e.Path = se.Path
 	e.Entity = se.Entity
+	e.Attribute = se.Attribute
 	e.Relation = se.Relation
 	e.Operator = se.Operator
 	e.Line = se.Line

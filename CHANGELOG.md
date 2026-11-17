@@ -3,6 +3,28 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.4.0
+
+### Added
+- **`Error.Doc`, `Error.Rule` and `Error.Attribute`**, set when the engine sends
+  them, like `Hint`: `Rule` is the rule that refused and `Doc` its manual
+  section (e.g. `errors/relation_data`, readable at
+  `GET /docs/errors/relation_data`). Every error a call returns keeps them,
+  `Exec` results (`OpResult.Error`), `ResultAs` / `ResultOneAs` and generated
+  batch members included; empty and left out of JSON when absent.
+- **`WatchEvent.Err` on `subscription/rejected`**: the error the refused
+  subscribe or refresh returned (an `*Error` for an engine refusal, with
+  `Code`, `Hint`, `Rule`, `Doc`), beside the unchanged `Reason`.
+
+### Fixed
+- `Destroy` returns `true` once the engine accepts it, also when the engine
+  answers `null` (it returned `false`).
+- `Onboard` / `OnboardComplete` answered an engine error object (a router 404, a
+  500, a 503 `MODULE_NOT_LOADED`) with `HTTP_ERROR`; they return the engine's
+  error, its code and fields included. Bare-string codes are unchanged.
+- `synthigy-gen` describe failures show the engine's position, hint and manual section
+  (`docs: <endpoint>/docs/<doc>`), not only the message and code.
+
 ## 0.3.0
 
 Needs engine v0.5.0 or later.

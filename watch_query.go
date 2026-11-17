@@ -161,7 +161,7 @@ func (s *SqlTemplateWatch) debounce(ev WatchEvent) WatchEvent {
 func (s *SqlTemplateWatch) refresh(trigger WatchEvent) {
 	after, err := s.client.SQLTemplate(s.ctx, s.template, s.params, s.opts...)
 	if err != nil {
-		s.buf.push(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err)})
+		s.buf.push(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err), Err: err})
 		return
 	}
 	s.mu.Lock()
@@ -385,7 +385,7 @@ func (q *QueryWatch) debounce(ev WatchEvent) WatchEvent {
 func (q *QueryWatch) refresh(trigger WatchEvent) {
 	rows, err := q.runQuery(q.ctx)
 	if err != nil {
-		q.buf.push(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err)})
+		q.buf.push(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err), Err: err})
 		return
 	}
 	q.mu.Lock()

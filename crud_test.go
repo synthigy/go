@@ -282,6 +282,27 @@ func TestDestroyIsDeleteOnDatasetByXid(t *testing.T) {
 	}
 }
 
+func TestDestroyAnswersTrueWhateverDataTheEngineSends(t *testing.T) {
+	for _, res := range []map[string]any{
+		{"ok": true, "data": true},
+		{"ok": true, "data": nil},
+		{"ok": true},
+	} {
+		c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeResults(w, []map[string]any{res})
+		}))
+		if ok, err := c.Destroy(context.Background(), "ds-1"); err != nil || !ok {
+			t.Fatalf("%v: Destroy = %v, %v; want true, nil", res, ok, err)
+		}
+	}
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeResults(w, []map[string]any{{"ok": false, "error": map[string]any{"message": "no", "code": "FORBIDDEN"}}})
+	}))
+	if ok, err := c.Destroy(context.Background(), "ds-1"); ok || err == nil {
+		t.Fatalf("refused Destroy = %v, %v; want false, an error", ok, err)
+	}
+}
+
 // Bulk import: one operation carries every record, silent by default.
 func TestSyncManySendsOneOpWithAllRecords(t *testing.T) {
 	var ops []map[string]any
