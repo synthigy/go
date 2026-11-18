@@ -325,14 +325,6 @@ func Listen(ctx context.Context, opts ...Opt) *Stream[Event] {
 	return mustDflt().Listen(ctx, opts...)
 }
 
-func Observe(ctx context.Context, d Descriptor, opts ...Opt) (*Stream[Event], error) {
-	c, err := dflt()
-	if err != nil {
-		return nil, err
-	}
-	return c.Observe(ctx, d, opts...)
-}
-
 func Watch(ctx context.Context, interest WatchInterest, opts ...Opt) (*WatchHandle, error) {
 	c, err := dflt()
 	if err != nil {
@@ -369,58 +361,7 @@ func WatchSqlTemplate(ctx context.Context, template string, params []any, opts .
 	return c.WatchSqlTemplate(ctx, template, params, opts...)
 }
 
-// ---------------------------------------------------------------------------
-// Subscriptions (advanced — prefer the Watch family)
-// ---------------------------------------------------------------------------
-
-func Subscribe(ctx context.Context, d Descriptor, opts ...Opt) (string, error) {
-	c, err := dflt()
-	if err != nil {
-		return "", err
-	}
-	return c.Subscribe(ctx, d, opts...)
-}
-
-func Unsubscribe(ctx context.Context, handle string) error {
-	c, err := dflt()
-	if err != nil {
-		return err
-	}
-	return c.Unsubscribe(ctx, handle)
-}
-
-func SubscribeModel(ctx context.Context, raw bool) error {
-	c, err := dflt()
-	if err != nil {
-		return err
-	}
-	return c.SubscribeModel(ctx, raw)
-}
-
-func UnsubscribeModel(ctx context.Context, raw bool) error {
-	c, err := dflt()
-	if err != nil {
-		return err
-	}
-	return c.UnsubscribeModel(ctx, raw)
-}
-
-func SetSubscriptions(ctx context.Context, items []Descriptor, opts ...Opt) error {
-	c, err := dflt()
-	if err != nil {
-		return err
-	}
-	return c.SetSubscriptions(ctx, items, opts...)
-}
-
-func ClearSubscriptions(ctx context.Context) error {
-	c, err := dflt()
-	if err != nil {
-		return err
-	}
-	return c.ClearSubscriptions(ctx)
-}
-
+// Subscriptions reports the default client's subscription set as the engine holds it.
 func Subscriptions(ctx context.Context) (map[string]any, error) {
 	c, err := dflt()
 	if err != nil {

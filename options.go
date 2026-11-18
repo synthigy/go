@@ -16,8 +16,7 @@ type callOptions struct {
 	raw         bool   // tree ops: return flat array instead of composing
 	childrenKey string // tree ops: nesting key (default "_children")
 
-	// subscription / observe
-	key           string
+	// watch backfill
 	backfill      bool
 	backfillLimit int
 
@@ -102,15 +101,12 @@ func Raw(v bool) Opt { return func(o *callOptions) { o.raw = v } }
 // "_children").
 func ChildrenKey(key string) Opt { return func(o *callOptions) { o.childrenKey = key } }
 
-// SubKey gives a subscription/observe flow a stable handle for later
-// unsubscribe; defaults to a hash of the descriptor.
-func SubKey(key string) Opt { return func(o *callOptions) { o.key = key } }
-
-// Backfill replays /history events missed during an Observe disconnect.
+// Backfill makes a Watch replay the record events missed during a reconnect
+// from /history.
 func Backfill(v bool) Opt { return func(o *callOptions) { o.backfill = v } }
 
-// BackfillLimit caps the number of history rows per backfill pass (default
-// 1000).
+// BackfillLimit caps the history rows a backfilling Watch reads per record
+// (default 1000).
 func BackfillLimit(n int) Opt { return func(o *callOptions) { o.backfillLimit = n } }
 
 // Entities lists the entity names a SQL template / query reads from, so the

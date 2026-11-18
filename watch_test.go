@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -262,4 +264,261 @@ func TestWatchQueryRejectedRefreshCarriesTheError(t *testing.T) {
 	}
 	defer qw.Close()
 	assertRejectionError(t, nextRejected(t, qw.Events()))
+}
+
+// The engine drops an identity's subscriptions when its last stream closes,
+// so the multiplexer must post the same union again after a reconnect.
+func TestAWatchOnEveryOpKeepsTheFilterOff(t *testing.T) {
+	bodies := make(chan string, 16)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/schema", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entities": map[string]any{}})
+	})
+	mux.HandleFunc("/data/subscription/set", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies <- string(raw)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/data/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "event: open\ndata: {}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waitFor := func(want string) string {
+		for {
+			select {
+			case b := <-bodies:
+				if strings.Contains(b, want) {
+					return b
+				}
+			case <-ctx.Done():
+				t.Fatalf("no subscription POST containing %s", want)
+			}
+		}
+	}
+	w1, err := c.Watch(ctx, WatchInterest{Records: []string{"r1"}, Ops: []string{"insert"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w1.Close()
+	if b := waitFor(`"r1"`); !strings.Contains(b, `"operations":["insert"]`) {
+		t.Fatalf("a lone filtered watch keeps its filter: %s", b)
+	}
+	w2, err := c.Watch(ctx, WatchInterest{Records: []string{"r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+	if b := waitFor(`"r2"`); strings.Contains(b, "operations") {
+		t.Fatalf("r2 wants every op, so no filter may go out: %s", b)
+	}
+}
+
+func TestWatchResubscribesAfterReconnect(t *testing.T) {
+	var streams, posts atomic.Int32
+	bodies := make(chan string, 8)
+	opened := make(chan string, 8)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/schema", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entities": map[string]any{}})
+	})
+	mux.HandleFunc("/data/subscription/set", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		stream, _ := body["stream"].(string)
+		sig, _ := json.Marshal(body["subscriptions"])
+		posts.Add(1)
+		bodies <- stream + " " + string(sig)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/data/events", func(w http.ResponseWriter, r *http.Request) {
+		fl := w.(http.Flusher)
+		opened <- r.URL.Query().Get("stream")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fl.Flush()
+		if streams.Add(1) == 1 {
+			for posts.Load() == 0 {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			return
+		}
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	w, err := c.Watch(ctx, WatchInterest{Records: []string{"r1"}})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Close()
+
+	var got []string
+	for len(got) < 2 {
+		select {
+		case b := <-bodies:
+			got = append(got, b)
+		case <-ctx.Done():
+			t.Fatalf("no resubscribe after reconnect: streams=%d posts=%v", streams.Load(), got)
+		}
+	}
+	first, second := <-opened, <-opened
+	if len(first) != 32 || first == second {
+		t.Fatalf("each connection needs a fresh 32-char stream id: %q then %q", first, second)
+	}
+	set0, set1 := strings.TrimPrefix(got[0], first+" "), strings.TrimPrefix(got[1], second+" ")
+	if set0 == got[0] || set1 == got[1] {
+		t.Fatalf("each POST must name its own stream (%s, %s): %v", first, second, got)
+	}
+	if set0 != set1 {
+		t.Fatalf("resubscribe posted a different set: %s vs %s", set0, set1)
+	}
+}
+
+func refusingEvents(hits *atomic.Int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(403)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "no events", "code": "ENTITY_FORBIDDEN"}})
+	}
+}
+
+func TestListenStopsOnAny403(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(refusingEvents(&hits))
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	s := c.Listen(ctx)
+	for range s.Events() {
+	}
+	var se *Error
+	if err := s.Err(); !errors.As(err, &se) || se.Code != "ENTITY_FORBIDDEN" || se.Status != 403 {
+		t.Fatalf("Err = %v", err)
+	}
+	if ctx.Err() != nil || hits.Load() != 1 {
+		t.Fatalf("kept reconnecting: hits=%d", hits.Load())
+	}
+}
+
+func TestAWatchAfterARefusalOpensANewStream(t *testing.T) {
+	var hits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/schema", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entities": map[string]any{}})
+	})
+	mux.HandleFunc("/data/subscription/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/data/events", refusingEvents(&hits))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for i := 1; i <= 2; i++ {
+		w, err := c.Watch(ctx, WatchInterest{Records: []string{"r1"}})
+		if err != nil {
+			t.Fatalf("Watch %d: %v", i, err)
+		}
+		select {
+		case ev := <-w.Events():
+			if ev.Type != "subscription/rejected" {
+				t.Fatalf("watch %d event = %+v", i, ev)
+			}
+		case <-ctx.Done():
+			t.Fatalf("watch %d never heard the refusal: the stream was not reopened", i)
+		}
+		if got := hits.Load(); got != int32(i) {
+			t.Fatalf("watch %d: %d stream attempts", i, got)
+		}
+	}
+}
+
+func TestWatchGetsTheStreamRefusal(t *testing.T) {
+	var hits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/schema", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entities": map[string]any{}})
+	})
+	mux.HandleFunc("/data/subscription/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/data/events", refusingEvents(&hits))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	w, err := c.Watch(ctx, WatchInterest{Records: []string{"r1"}})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Close()
+	select {
+	case ev := <-w.Events():
+		var se *Error
+		if ev.Type != "subscription/rejected" || !errors.As(ev.Err, &se) || se.Code != "ENTITY_FORBIDDEN" {
+			t.Fatalf("event = %+v", ev)
+		}
+	case <-ctx.Done():
+		t.Fatal("no subscription/rejected after the stream was refused")
+	}
+}
+
+func TestAStaleStreamRefusalLeavesTheNewStreamRunning(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(refusingEvents(&hits))
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
+	defer c.Close()
+	m := newWatchMultiplexer(c, false, false)
+	w := &WatchHandle{mux: m, sinks: map[*coalesceBuffer]struct{}{}, subscribed: make(chan struct{})}
+	w.first = newCoalesceBuffer("coalesce", 100)
+	w.sinks[w.first] = struct{}{}
+	m.mu.Lock()
+	m.running = true
+	m.watches[w] = struct{}{}
+	current := m.ctx
+	m.mu.Unlock()
+	m.runSSE(context.Background())
+	m.mu.Lock()
+	running, same := m.running, m.ctx == current
+	m.mu.Unlock()
+	if hits.Load() != 1 || !running || !same || current.Err() != nil {
+		t.Fatalf("the stale stream's refusal reset the current one: running=%v same=%v err=%v", running, same, current.Err())
+	}
+	select {
+	case <-w.subscribed:
+		t.Fatal("the stale stream marked the current generation's watch subscribed")
+	default:
+	}
+	select {
+	case ev := <-w.first.out:
+		t.Fatalf("the stale stream's refusal reached the current generation's watch: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+	w.first.close()
 }

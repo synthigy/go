@@ -4,19 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"sort"
 )
 
-// Descriptor identifies which records to subscribe to. Records is required
-// and non-empty; Operations optionally narrows to a vocab subset (e.g.
-// "update", "link").
-type Descriptor struct {
+// subDescriptor names records to subscribe to, optionally narrowed to some operations.
+type subDescriptor struct {
 	Records    []string
 	Operations []string
 }
-
-// RecordsDesc is a shorthand for a record-only Descriptor.
-func RecordsDesc(xids ...string) Descriptor { return Descriptor{Records: xids} }
 
 // descriptor is the internal set-based form.
 type descriptor struct {
@@ -24,7 +20,7 @@ type descriptor struct {
 	operations map[string]struct{} // nil if unspecified
 }
 
-func normalizeDescriptor(d Descriptor) (descriptor, error) {
+func normalizeDescriptor(d subDescriptor) (descriptor, error) {
 	if len(d.Records) == 0 {
 		return descriptor{}, newError(
 			"records must be a non-empty array of xid strings", "EMPTY_RECORDS")
@@ -98,11 +94,14 @@ func (c *Client) buildSubscriptionsBody() map[string]any {
 }
 
 // flushSubscriptions POSTs the current local subscription state to the
-// server (full set-replace).
-func (c *Client) flushSubscriptions(ctx context.Context) error {
+// server (full set-replace), to one event stream's set when stream is set.
+func (c *Client) flushSubscriptions(ctx context.Context, stream string) error {
 	c.subMu.Lock()
 	body := c.buildSubscriptionsBody()
 	c.subMu.Unlock()
+	if stream != "" {
+		body["stream"] = stream
+	}
 
 	data, _ := json.Marshal(body)
 	resp, err := c.fetchAuth(ctx, http.MethodPost, c.endpoint+"/data/subscription/set", data,
@@ -118,28 +117,23 @@ func (c *Client) flushSubscriptions(ctx context.Context) error {
 	return nil
 }
 
-// Subscribe adds a record descriptor to the subscription set and POSTs the
-// full set. Returns the local handle (the SubKey option, or the descriptor's
-// stable hash) for later Unsubscribe.
-func (c *Client) Subscribe(ctx context.Context, d Descriptor, opts ...Opt) (string, error) {
-	o := applyOpts(opts)
+// subscribe adds a record descriptor to the subscription set and POSTs the
+// full set. Returns the descriptor's stable hash for later unsubscribe.
+func (c *Client) subscribe(ctx context.Context, d subDescriptor) (string, error) {
 	nd, err := normalizeDescriptor(d)
 	if err != nil {
 		return "", err
 	}
-	key := o.key
-	if key == "" {
-		key = descriptorKey(nd)
-	}
+	key := descriptorKey(nd)
 	c.subMu.Lock()
 	c.dataSubs[key] = nd
 	c.subMu.Unlock()
-	return key, c.flushSubscriptions(ctx)
+	return key, c.flushSubscriptions(ctx, "")
 }
 
-// Unsubscribe removes a data subscription by its handle (the key returned
-// from Subscribe). Unknown handles are a no-op.
-func (c *Client) Unsubscribe(ctx context.Context, handle string) error {
+// unsubscribe removes a data subscription by its handle (the key returned
+// from subscribe). Unknown handles are a no-op.
+func (c *Client) unsubscribe(ctx context.Context, handle string) error {
 	c.subMu.Lock()
 	_, existed := c.dataSubs[handle]
 	if existed {
@@ -149,12 +143,12 @@ func (c *Client) Unsubscribe(ctx context.Context, handle string) error {
 	if !existed {
 		return nil
 	}
-	return c.flushSubscriptions(ctx)
+	return c.flushSubscriptions(ctx, "")
 }
 
-// SubscribeModel subscribes to model deploy notifications. raw=false (default)
+// subscribeModel subscribes to model deploy notifications. raw=false (default)
 // watches the runtime model; raw=true watches the raw deployed model.
-func (c *Client) SubscribeModel(ctx context.Context, raw bool) error {
+func (c *Client) subscribeModel(ctx context.Context, raw bool) error {
 	t := "runtime-model"
 	if raw {
 		t = "deployed-model"
@@ -162,11 +156,11 @@ func (c *Client) SubscribeModel(ctx context.Context, raw bool) error {
 	c.subMu.Lock()
 	c.modelSubs[t] = struct{}{}
 	c.subMu.Unlock()
-	return c.flushSubscriptions(ctx)
+	return c.flushSubscriptions(ctx, "")
 }
 
-// UnsubscribeModel removes a model subscription.
-func (c *Client) UnsubscribeModel(ctx context.Context, raw bool) error {
+// unsubscribeModel removes a model subscription.
+func (c *Client) unsubscribeModel(ctx context.Context, raw bool) error {
 	t := "runtime-model"
 	if raw {
 		t = "deployed-model"
@@ -178,14 +172,12 @@ func (c *Client) UnsubscribeModel(ctx context.Context, raw bool) error {
 	if !existed {
 		return nil
 	}
-	return c.flushSubscriptions(ctx)
+	return c.flushSubscriptions(ctx, "")
 }
 
-// SetSubscriptions replaces the entire subscription set in one call. Each
-// Descriptor must carry non-empty Records; use SubKey on the descriptor via
-// the keys slice (parallel to items) for stable handles, or leave nil to use
-// hashes.
-func (c *Client) SetSubscriptions(ctx context.Context, items []Descriptor, opts ...Opt) error {
+// setSubscriptions replaces the entire subscription set in one call. Each
+// descriptor must carry non-empty Records.
+func (c *Client) setSubscriptions(ctx context.Context, items []subDescriptor) error {
 	normalized := make(map[string]descriptor, len(items))
 	for _, it := range items {
 		nd, err := normalizeDescriptor(it)
@@ -200,23 +192,33 @@ func (c *Client) SetSubscriptions(ctx context.Context, items []Descriptor, opts 
 	c.relationSubs = map[string]struct{}{}
 	c.modelSubs = map[string]struct{}{}
 	c.subMu.Unlock()
-	return c.flushSubscriptions(ctx)
+	return c.flushSubscriptions(ctx, "")
 }
 
-// ClearSubscriptions removes all subscriptions for this session.
-func (c *Client) ClearSubscriptions(ctx context.Context) error {
+// clearSubscriptions removes all subscriptions for this session.
+func (c *Client) clearSubscriptions(ctx context.Context) error {
 	c.subMu.Lock()
 	c.dataSubs = map[string]descriptor{}
 	c.entitySubs = map[string]struct{}{}
 	c.relationSubs = map[string]struct{}{}
 	c.modelSubs = map[string]struct{}{}
 	c.subMu.Unlock()
-	return c.flushSubscriptions(ctx)
+	return c.flushSubscriptions(ctx, "")
 }
 
-// Subscriptions fetches the current subscription status from the server.
+// Subscriptions fetches the current subscription status from the server, for
+// the watch multiplexer's event stream when one is open.
 func (c *Client) Subscriptions(ctx context.Context) (map[string]any, error) {
-	raw, err := c.getJSON(ctx, c.endpoint+"/data/subscription/status")
+	u := c.endpoint + "/data/subscription/status"
+	c.muxMu.Lock()
+	mux := c.mux
+	c.muxMu.Unlock()
+	if mux != nil {
+		if stream := mux.currentStream(); stream != "" {
+			u += "?stream=" + url.QueryEscape(stream)
+		}
+	}
+	raw, err := c.getJSON(ctx, u)
 	if err != nil {
 		return nil, err
 	}
@@ -228,10 +230,10 @@ func (c *Client) Subscriptions(ctx context.Context) (map[string]any, error) {
 }
 
 // setSubscriptionsItems replaces the local mirror from a list of wire items
-// (mixed tracks: data / entity / relation / runtime-model) and flushes. Used
-// by the watch multiplexer, which computes a consolidated union. Mirrors the
-// JS setSubscriptions(items) item parsing.
-func (c *Client) setSubscriptionsItems(ctx context.Context, items []map[string]any) error {
+// (mixed tracks: data / entity / relation / runtime-model) and flushes it to
+// the given event stream's set. Used by the watch multiplexer, which computes
+// a consolidated union.
+func (c *Client) setSubscriptionsItems(ctx context.Context, items []map[string]any, stream string) error {
 	c.subMu.Lock()
 	c.dataSubs = map[string]descriptor{}
 	c.entitySubs = map[string]struct{}{}
@@ -244,7 +246,7 @@ func (c *Client) setSubscriptionsItems(ctx context.Context, items []map[string]a
 		}
 		switch t {
 		case "data":
-			d := Descriptor{Records: anyToStrings(it["records"])}
+			d := subDescriptor{Records: anyToStrings(it["records"])}
 			if ops, ok := it["operations"]; ok {
 				d.Operations = anyToStrings(ops)
 			}
@@ -267,7 +269,7 @@ func (c *Client) setSubscriptionsItems(ctx context.Context, items []map[string]a
 		}
 	}
 	c.subMu.Unlock()
-	return c.flushSubscriptions(ctx)
+	return c.flushSubscriptions(ctx, stream)
 }
 
 func anyToStrings(v any) []string {
@@ -284,20 +286,4 @@ func anyToStrings(v any) []string {
 		return out
 	}
 	return nil
-}
-
-// addDataSub / removeDataSub are internal helpers used by Observe to manage
-// the local mirror around each SSE session.
-func (c *Client) addDataSub(key string, d descriptor) {
-	c.subMu.Lock()
-	c.dataSubs[key] = d
-	c.subMu.Unlock()
-}
-
-func (c *Client) removeDataSub(key string) bool {
-	c.subMu.Lock()
-	_, existed := c.dataSubs[key]
-	delete(c.dataSubs, key)
-	c.subMu.Unlock()
-	return existed
 }

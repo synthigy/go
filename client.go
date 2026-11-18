@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -334,20 +337,68 @@ func (c *cancelOnClose) Close() error {
 	return err
 }
 
+// busyAttempts is how many times a request the engine turned away as
+// SERVER_BUSY is sent in total; it never ran, so resending is safe.
+const busyAttempts = 3
+
+// busyMaxSeconds caps a Retry-After before jitter, so a proxy's long value
+// can't park a call.
+const busyMaxSeconds = 10
+
+// busyDelay is the wait before resending a SERVER_BUSY request: Retry-After
+// seconds (1 when absent) with ±50% jitter.
+var busyDelay = func(retryAfter string) time.Duration {
+	s, err := strconv.Atoi(strings.TrimSpace(retryAfter))
+	if err != nil || s <= 0 {
+		s = 1
+	}
+	base := time.Duration(min(s, busyMaxSeconds)) * time.Second
+	return base/2 + time.Duration(rand.Int64N(int64(base)))
+}
+
 // post POSTs a JSON body to /data and returns the raw response body plus the
-// X-Request-Id. It handles 403 and non-2xx by returning an *Error.
+// X-Request-Id. It handles 403 and non-2xx by returning an *Error, and
+// resends a SERVER_BUSY refusal up to busyAttempts times.
 func (c *Client) post(ctx context.Context, body any) ([]byte, string, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, "", newError("failed to encode request: "+err.Error(), "INVALID_BODY")
 	}
+	started := time.Now()
+	for attempt := 1; ; attempt++ {
+		raw, rid, retryAfter, err := c.postOnce(ctx, data)
+		var se *Error
+		if attempt >= busyAttempts || !errors.As(err, &se) || se.Code != "SERVER_BUSY" {
+			return raw, rid, err
+		}
+		wait := busyDelay(retryAfter)
+		if c.timeout > 0 && time.Since(started)+wait >= c.timeout {
+			return raw, rid, err
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return raw, rid, ctx.Err()
+		case <-t.C:
+		}
+		if _, has := ctx.Deadline(); c.timeout > 0 && !has {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, started.Add(c.timeout))
+			defer cancel()
+		}
+	}
+}
+
+func (c *Client) postOnce(ctx context.Context, data []byte) ([]byte, string, string, error) {
 	resp, err := c.fetchAuth(ctx, http.MethodPost, c.dataURL, data,
 		map[string]string{"Content-Type": "application/json"}, true)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	defer resp.Body.Close()
 	rid := resp.Header.Get("X-Request-Id")
+	retryAfter := resp.Header.Get("Retry-After")
 	raw, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode == http.StatusForbidden {
@@ -355,19 +406,19 @@ func (c *Client) post(ctx context.Context, body any) ([]byte, string, error) {
 		if se == nil {
 			se = &serverError{Message: "Forbidden", Code: "FORBIDDEN"}
 		}
-		return nil, rid, errorFromServer(se, 403, rid)
+		return nil, rid, retryAfter, errorFromServer(se, 403, rid)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if se := parseServerError(raw); se != nil {
-			return nil, rid, errorFromServer(se, resp.StatusCode, rid)
+			return nil, rid, retryAfter, errorFromServer(se, resp.StatusCode, rid)
 		}
 		e := newError("Request failed", "HTTP_ERROR")
 		e.Details = string(raw)
 		e.Status = resp.StatusCode
 		e.RequestID = rid
-		return nil, rid, e
+		return nil, rid, retryAfter, e
 	}
-	return raw, rid, nil
+	return raw, rid, "", nil
 }
 
 // fetchFn returns a transport closure suitable for buffer-style consumers:

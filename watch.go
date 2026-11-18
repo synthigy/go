@@ -3,6 +3,7 @@ package synthigy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -28,7 +29,8 @@ type WatchInterest struct {
 // (subscription/rejected, connection/resumed, schema/changed) carry only
 // Type and, for rejections, Reason and Err, the error the refused call
 // returned (an *Error for an engine refusal). Raw holds the full source
-// envelope for data events.
+// envelope for data events. FromBackfill marks a record event replayed from
+// /history after a reconnect (the Backfill watch option).
 type WatchEvent struct {
 	Type     string
 	Record   string
@@ -47,6 +49,8 @@ type WatchEvent struct {
 	Reason   string
 	Err      error
 	Raw      map[string]any
+
+	FromBackfill bool
 }
 
 // getMultiplexer returns the client's shared watch multiplexer, creating it
@@ -71,6 +75,7 @@ type watchMultiplexer struct {
 	keepAlive     bool
 	sseEverOpened bool
 	lastUnion     string
+	streamID      string
 	running       bool
 
 	ctx      context.Context
@@ -151,7 +156,10 @@ func (m *watchMultiplexer) close() {
 		w.Close()
 	}
 	m.closeSSE()
-	m.cancel()
+	m.mu.Lock()
+	cancel := m.cancel
+	m.mu.Unlock()
+	cancel()
 }
 
 func (m *watchMultiplexer) ensureSSE() {
@@ -161,24 +169,35 @@ func (m *watchMultiplexer) ensureSSE() {
 		return
 	}
 	m.running = true
+	ctx := m.ctx
 	m.mu.Unlock()
 	go m.runFlush()
-	go m.runSSE()
+	go m.runSSE(ctx)
 }
 
-func (m *watchMultiplexer) closeSSE() {
+func (m *watchMultiplexer) closeSSE() { m.closeGeneration(nil) }
+
+// closeGeneration ends the current stream generation; given an owner ctx it does nothing once a newer one started.
+func (m *watchMultiplexer) closeGeneration(owner context.Context) {
 	m.mu.Lock()
+	if owner != nil && owner != m.ctx {
+		m.mu.Unlock()
+		return
+	}
 	m.running = false
 	m.lastUnion = ""
+	m.streamID = ""
 	m.sseEverOpened = false
-	m.mu.Unlock()
-	// The SSE goroutine watches m.ctx; cancelling here would kill the whole
-	// mux, so instead we rely on the next ensureSSE to restart. To actually
-	// stop the stream we recreate the cancellable context.
-	m.cancel()
-	m.mu.Lock()
+	cancel := m.cancel
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.mu.Unlock()
+	cancel()
+}
+
+func (m *watchMultiplexer) currentStream() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streamID
 }
 
 func (m *watchMultiplexer) scheduleFlush() {
@@ -202,24 +221,24 @@ func (m *watchMultiplexer) runFlush() {
 	}
 }
 
+// flush POSTs the union of every watch to the current stream; with no stream yet the next sse/open posts it.
 func (m *watchMultiplexer) flush(ctx context.Context) {
+	if ctx.Err() != nil {
+		m.scheduleFlush()
+		return
+	}
 	m.mu.Lock()
 	watches := make([]*WatchHandle, 0, len(m.watches))
 	for w := range m.watches {
 		watches = append(watches, w)
 	}
 	m.mu.Unlock()
-	defer func() {
-		for _, w := range watches {
-			w.markSubscribed()
-		}
-	}()
 
 	records := map[string]struct{}{}
 	entities := map[string]struct{}{}
 	relations := map[string]struct{}{}
 	ops := map[string]struct{}{}
-	anyOps := false
+	anyOps, allOps := false, false
 	for _, w := range watches {
 		i := w.getInterest()
 		for _, x := range i.Records {
@@ -231,7 +250,10 @@ func (m *watchMultiplexer) flush(ctx context.Context) {
 		for _, r := range i.Relations {
 			relations[r] = struct{}{}
 		}
-		if len(i.Ops) > 0 {
+		if len(i.Records) > 0 && len(i.Ops) == 0 {
+			allOps = true
+		}
+		if len(i.Records) > 0 && len(i.Ops) > 0 {
 			anyOps = true
 			for _, o := range i.Ops {
 				ops[o] = struct{}{}
@@ -242,7 +264,7 @@ func (m *watchMultiplexer) flush(ctx context.Context) {
 	items := []map[string]any{}
 	if len(records) > 0 {
 		item := map[string]any{"type": "data", "records": sortedKeys(records)}
-		if anyOps {
+		if anyOps && !allOps {
 			item["operations"] = sortedKeys(ops)
 		}
 		items = append(items, item)
@@ -259,36 +281,75 @@ func (m *watchMultiplexer) flush(ctx context.Context) {
 
 	sig, _ := json.Marshal(items)
 	m.mu.Lock()
-	if string(sig) == m.lastUnion {
+	stream := m.streamID
+	same := string(sig) == m.lastUnion
+	m.mu.Unlock()
+	if stream == "" {
+		return
+	}
+	if same {
+		markAll(watches)
+		return
+	}
+
+	err := m.client.setSubscriptionsItems(ctx, items, stream)
+	if ctx.Err() != nil {
+		return
+	}
+	var se *Error
+	if errors.As(err, &se) && se.Code == "STREAM_NOT_FOUND" {
+		m.mu.Lock()
+		if m.streamID == stream {
+			m.streamID = ""
+			m.lastUnion = ""
+		}
 		m.mu.Unlock()
 		return
 	}
-	m.lastUnion = string(sig)
-	m.mu.Unlock()
-
-	if err := m.client.setSubscriptionsItems(ctx, items); err != nil {
+	if err != nil {
 		m.fanOutSentinel(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err), Err: err})
+	} else {
+		m.mu.Lock()
+		current := m.streamID == stream
+		if current {
+			m.lastUnion = string(sig)
+		}
+		m.mu.Unlock()
+		if !current {
+			return
+		}
+	}
+	markAll(watches)
+}
+
+func markAll(watches []*WatchHandle) {
+	for _, w := range watches {
+		w.markSubscribed()
 	}
 }
 
-func (m *watchMultiplexer) runSSE() {
-	m.mu.Lock()
-	ctx := m.ctx
-	m.mu.Unlock()
-
+func (m *watchMultiplexer) runSSE(ctx context.Context) {
 	stream := m.client.Listen(ctx)
 	firstSession := true
 	for ev := range stream.Events() {
 		switch {
 		case ev.Type == "sse/open":
 			m.mu.Lock()
+			if ctx != m.ctx {
+				m.mu.Unlock()
+				continue
+			}
+			m.streamID = ev.Stream
 			m.sseEverOpened = true
+			m.lastUnion = ""
 			m.mu.Unlock()
 			if !firstSession {
 				m.fanOutSentinel(WatchEvent{Type: "connection/resumed"})
 			}
 			firstSession = false
 			m.scheduleFlush()
+		case ev.Type == "sse/close":
+			m.streamClosed(ctx, ev.Stream)
 		case ev.Type == "runtime-model" || ev.sseEvent == "runtime-model":
 			if m.resolver != nil {
 				go func() {
@@ -302,13 +363,35 @@ func (m *watchMultiplexer) runSSE() {
 		}
 	}
 	m.mu.Lock()
+	current := ctx == m.ctx
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	err := stream.Err()
+	fatal := isFatalStreamErr(err)
+	if fatal {
+		m.fanOutSentinel(WatchEvent{Type: "subscription/rejected", Reason: errMsg(err), Err: err})
+	}
+	m.mu.Lock()
 	waiting := make([]*WatchHandle, 0, len(m.watches))
 	for w := range m.watches {
 		waiting = append(waiting, w)
 	}
 	m.mu.Unlock()
-	for _, w := range waiting {
-		w.markSubscribed()
+	markAll(waiting)
+	if fatal {
+		m.closeGeneration(ctx)
+	}
+}
+
+// streamClosed forgets the stream and its posted union so flushes wait for the next sse/open.
+func (m *watchMultiplexer) streamClosed(ctx context.Context, stream string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ctx == m.ctx && m.streamID == stream {
+		m.streamID = ""
+		m.lastUnion = ""
 	}
 }
 
@@ -459,6 +542,13 @@ type WatchHandle struct {
 	subscribed     chan struct{}
 	subscribedOnce sync.Once
 
+	ctx       context.Context
+	cancel    context.CancelFunc
+	backfill  int
+	lastTs    string
+	replaying bool
+	held      []heldEvent
+
 	// first buffers from construction; the first Events() call takes it, so
 	// events that land before anyone listens are not lost.
 	first *coalesceBuffer
@@ -471,14 +561,22 @@ func (w *WatchHandle) Subscribed() <-chan struct{} { return w.subscribed }
 func (w *WatchHandle) markSubscribed() { w.subscribedOnce.Do(func() { close(w.subscribed) }) }
 
 // Watch opens a live subscription. The interest fuses onto the client's
-// shared SSE + subscription POST. Cancel via ctx or Watch.Close.
+// shared SSE + subscription POST. Cancel via ctx or Watch.Close. Backfill(true)
+// replays the record events missed during a reconnect from /history (asked
+// per watched record, at most BackfillLimit rows each, marked FromBackfill)
+// before connection/resumed.
 func (c *Client) Watch(ctx context.Context, interest WatchInterest, opts ...Opt) (*WatchHandle, error) {
 	ni, err := normalizeInterest(interest)
 	if err != nil {
 		return nil, err
 	}
+	o := applyOpts(opts)
 	mux := c.getMultiplexer()
 	w := &WatchHandle{mux: mux, intr: ni, sinks: map[*coalesceBuffer]struct{}{}, subscribed: make(chan struct{})}
+	w.ctx, w.cancel = context.WithCancel(context.Background())
+	if o.backfill {
+		w.backfill = max(o.backfillLimit, 1)
+	}
 	w.first = newCoalesceBuffer("coalesce", 100)
 	w.sinks[w.first] = struct{}{}
 	mux.register(w)
@@ -587,6 +685,9 @@ func (w *WatchHandle) Close() {
 	}
 	w.closed = true
 	w.markSubscribed()
+	if w.cancel != nil {
+		w.cancel()
+	}
 	sinks := make([]*coalesceBuffer, 0, len(w.sinks))
 	for buf := range w.sinks {
 		sinks = append(sinks, buf)
@@ -598,8 +699,42 @@ func (w *WatchHandle) Close() {
 	w.mux.unregister(w)
 }
 
-func (w *WatchHandle) pushEvent(ev WatchEvent)    { w.push(ev) }
-func (w *WatchHandle) pushSentinel(ev WatchEvent) { w.push(ev) }
+func (w *WatchHandle) pushEvent(ev WatchEvent) {
+	w.mu.Lock()
+	if w.replaying {
+		w.held = append(w.held, heldEvent{ev: ev})
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+	w.deliver(ev)
+}
+
+func (w *WatchHandle) pushSentinel(ev WatchEvent) {
+	w.mu.Lock()
+	if w.replaying {
+		w.held = append(w.held, heldEvent{ev: ev, sentinel: true})
+		w.mu.Unlock()
+		return
+	}
+	if ctx, from, records, ops, ok := w.startReplayLocked(ev); ok {
+		w.mu.Unlock()
+		go w.replayGap(ctx, ev, from, records, ops)
+		return
+	}
+	w.mu.Unlock()
+	w.deliver(ev)
+}
+
+// deliver hands an event to every sink, tracking the newest ts seen.
+func (w *WatchHandle) deliver(ev WatchEvent) {
+	w.mu.Lock()
+	if ev.Ts != "" && ev.Ts > w.lastTs {
+		w.lastTs = ev.Ts
+	}
+	w.mu.Unlock()
+	w.push(ev)
+}
 
 func (w *WatchHandle) push(ev WatchEvent) {
 	w.mu.Lock()

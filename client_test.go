@@ -150,6 +150,124 @@ func Test403Forbidden(t *testing.T) {
 	}
 }
 
+func busyThen(t *testing.T, busy int, code string) (*Client, *int) {
+	t.Helper()
+	saved := busyDelay
+	busyDelay = func(string) time.Duration { return time.Millisecond }
+	t.Cleanup(func() { busyDelay = saved })
+	calls := 0
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= busy {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "busy", "code": code, "retryable": true},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{"ok": true, "data": []any{}}}})
+	}))
+	return c, &calls
+}
+
+func TestServerBusyIsResent(t *testing.T) {
+	c, calls := busyThen(t, 2, "SERVER_BUSY")
+	if _, err := c.Search(context.Background(), "movie", nil, Selection{"x": nil}); err != nil || *calls != 3 {
+		t.Fatalf("expected success on the third attempt, got %v after %d", err, *calls)
+	}
+}
+
+func TestServerBusyGivesUpAfterThreeAttempts(t *testing.T) {
+	c, calls := busyThen(t, 99, "SERVER_BUSY")
+	_, err := c.Search(context.Background(), "movie", nil, Selection{"x": nil})
+	var se *Error
+	if !errors.As(err, &se) || se.Code != "SERVER_BUSY" || se.Category != "rate_limit" || !se.Retryable || se.Status != 503 || *calls != 3 {
+		t.Fatalf("expected a retryable SERVER_BUSY 503 after 3 attempts, got %+v after %d", err, *calls)
+	}
+}
+
+func TestOtherRefusalsAreNotResent(t *testing.T) {
+	c, calls := busyThen(t, 99, "MODULE_NOT_LOADED")
+	if _, err := c.Search(context.Background(), "movie", nil, Selection{"x": nil}); err == nil || *calls != 1 {
+		t.Fatalf("expected one attempt, got %v after %d", err, *calls)
+	}
+}
+
+func TestACancelledCallStopsWaiting(t *testing.T) {
+	c, calls := busyThen(t, 99, "SERVER_BUSY")
+	busyDelay = func(string) time.Duration { return time.Hour }
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.Search(ctx, "movie", nil, Selection{"x": nil})
+	if !errors.Is(err, context.DeadlineExceeded) || *calls != 1 || time.Since(start) > 5*time.Second {
+		t.Fatalf("expected the wait to end with the context, got %v after %d", err, *calls)
+	}
+}
+
+func TestTheClientTimeoutBoundsTheBusyWait(t *testing.T) {
+	saved := busyDelay
+	busyDelay = func(string) time.Duration { return time.Hour }
+	t.Cleanup(func() { busyDelay = saved })
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "busy", "code": "SERVER_BUSY"}})
+	}))
+	t.Cleanup(srv.Close)
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t", Timeout: 200 * time.Millisecond})
+	start := time.Now()
+	_, err := c.Search(context.Background(), "movie", nil, Selection{"x": nil})
+	var se *Error
+	if !errors.As(err, &se) || se.Code != "SERVER_BUSY" || calls != 1 || time.Since(start) > 5*time.Second {
+		t.Fatalf("expected SERVER_BUSY at once, got %v after %d", err, calls)
+	}
+}
+
+func TestABusyResendGetsOnlyTheTimeLeft(t *testing.T) {
+	saved := busyDelay
+	busyDelay = func(string) time.Duration { return time.Millisecond }
+	t.Cleanup(func() { busyDelay = saved })
+	var calls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			time.Sleep(300 * time.Millisecond)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "busy", "code": "SERVER_BUSY"}})
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	c, _ := New(Config{Endpoint: srv.URL, Token: "t", Timeout: 500 * time.Millisecond})
+	start := time.Now()
+	_, err := c.Search(context.Background(), "movie", nil, Selection{"x": nil})
+	if took := time.Since(start); err == nil || calls.Load() != 2 || took > 700*time.Millisecond {
+		t.Fatalf("expected the resend to end near the 500ms client timeout, got %v after %d calls in %v", err, calls.Load(), took)
+	}
+}
+
+func TestBusyDelayFollowsRetryAfter(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		if d := busyDelay("2"); d < time.Second || d >= 3*time.Second {
+			t.Fatalf("Retry-After 2 gave %v", d)
+		}
+		if d := busyDelay(""); d < 500*time.Millisecond || d >= 1500*time.Millisecond {
+			t.Fatalf("no Retry-After gave %v", d)
+		}
+		if d := busyDelay("10000000000"); d < 5*time.Second || d >= 15*time.Second {
+			t.Fatalf("a huge Retry-After gave %v", d)
+		}
+	}
+}
+
 func TestClientCredentialsAndRefreshOn401(t *testing.T) {
 	var tokenCalls int32
 	var dataCalls int32
@@ -199,10 +317,10 @@ func TestSubscribeSetBody(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 
-	_, err := c.Subscribe(context.Background(),
-		Descriptor{Records: []string{"b", "a"}, Operations: []string{"update"}})
+	_, err := c.subscribe(context.Background(),
+		subDescriptor{Records: []string{"b", "a"}, Operations: []string{"update"}})
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("subscribe: %v", err)
 	}
 	subs := got["subscriptions"].([]any)
 	if len(subs) != 1 {
@@ -220,7 +338,7 @@ func TestSubscribeSetBody(t *testing.T) {
 
 func TestSubscribeRejectsEmptyRecords(t *testing.T) {
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	_, err := c.Subscribe(context.Background(), Descriptor{Records: nil})
+	_, err := c.subscribe(context.Background(), subDescriptor{Records: nil})
 	var se *Error
 	if !errors.As(err, &se) || se.Code != "EMPTY_RECORDS" {
 		t.Fatalf("expected EMPTY_RECORDS, got %v", err)
@@ -244,41 +362,6 @@ func sseHandler(frames []string) http.HandlerFunc {
 			fl.Flush()
 		}
 		<-r.Context().Done()
-	}
-}
-
-func TestObserveFiltersByDescriptor(t *testing.T) {
-	frames := []string{
-		"event: data\ndata: {\"type\":\"record/update\",\"record-xid\":\"u-1\",\"after\":{\"name\":\"X\"}}\n\n",
-		"event: data\ndata: {\"type\":\"record/update\",\"record-xid\":\"other\",\"after\":{\"name\":\"Y\"}}\n\n",
-		"event: data\ndata: {\"type\":\"record/delete\",\"record-xid\":\"u-1\"}\n\n",
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/data/subscription/set", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-	})
-	mux.HandleFunc("/data/events", sseHandler(frames))
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	c, _ := New(Config{Endpoint: srv.URL, Token: "t"})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	stream, err := c.Observe(ctx, RecordsDesc("u-1"))
-	if err != nil {
-		t.Fatalf("Observe: %v", err)
-	}
-	defer stream.Close()
-
-	var got []string
-	for ev := range stream.Events() {
-		got = append(got, ev.Type+":"+ev.RecordXID)
-		if ev.Type == "record/delete" {
-			break
-		}
-	}
-	if len(got) != 2 || got[0] != "record/update:u-1" || got[1] != "record/delete:u-1" {
-		t.Fatalf("expected only u-1 events, got %v", got)
 	}
 }
 
@@ -308,7 +391,7 @@ func TestSSEFrameParsing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var sawOpen, sawData bool
-	err := c.sseSession(ctx, "", func(f sseFrame) bool {
+	err := c.sseSession(ctx, "", "", func(f sseFrame) bool {
 		if f.event == "open" {
 			sawOpen = true
 			return true

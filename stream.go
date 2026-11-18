@@ -10,7 +10,7 @@ import (
 // (ctx cancelled, Close called, or a terminal error). After the channel
 // closes, Err() reports the terminal error, if any.
 //
-//	s := client.Observe(ctx, synthigy.RecordsDesc("u-1"))
+//	s := client.Listen(ctx)
 //	defer s.Close()
 //	for ev := range s.Events() {
 //	    // handle ev

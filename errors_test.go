@@ -23,6 +23,12 @@ func TestErrorCategoryAndRetryable(t *testing.T) {
 		{"UNKNOWN_ENTITY", "not_found", false},
 		{"UNIQUE_VIOLATION", "conflict", false},
 		{"TIMEOUT", "rate_limit", true},
+		{"SERVER_BUSY", "rate_limit", true},
+		{"BAD_DATA_SHAPE", "validation", false},
+		{"REF_NOT_FOUND", "not_found", false},
+		{"GUARD_VIOLATION", "conflict", false},
+		{"DB_UNAVAILABLE", "internal", true},
+		{"DB_ERROR", "internal", false},
 		{"NETWORK_ERROR", "network", true},
 		{"INTERNAL_ERROR", "internal", true},
 		{"SOMETHING_NEW", "internal", false}, // unknown code -> internal, not retryable
@@ -53,10 +59,10 @@ func TestErrorCategoryAndRetryable(t *testing.T) {
 
 func TestServerRetryableFlagWins(t *testing.T) {
 	yes, no := true, false
-	if e := errorFromServer(&serverError{Code: "DB_UNAVAILABLE", Retryable: &yes}, 200, ""); !e.Retryable {
+	if e := errorFromServer(&serverError{Code: "DB_ERROR", Retryable: &yes}, 200, ""); !e.Retryable {
 		t.Error("server-marked unknown code must be retryable")
 	}
-	if e := errorFromServer(&serverError{Code: "DB_UNAVAILABLE"}, 200, ""); e.Retryable {
+	if e := errorFromServer(&serverError{Code: "DB_ERROR"}, 200, ""); e.Retryable {
 		t.Error("unmarked unknown code must not be retryable")
 	}
 	if e := errorFromServer(&serverError{Code: "INTERNAL_ERROR", Retryable: &no}, 500, ""); e.Retryable {
@@ -225,7 +231,7 @@ func TestEveryEndpointKeepsDocRuleAttribute(t *testing.T) {
 		{"compile", 400, refused, func(c *Client) error { _, err := c.Compile(ctx, "movie\n  title\n", nil); return err }},
 		{"compile per-op", 200, perOp, func(c *Client) error { _, err := c.Compile(ctx, "movie\n  title\n", nil); return err }},
 		{"history", 400, refused, func(c *Client) error { _, err := c.History().Events(ctx, ""); return err }},
-		{"subscription set", 400, refused, func(c *Client) error { return c.ClearSubscriptions(ctx) }},
+		{"subscription set", 400, refused, func(c *Client) error { return c.clearSubscriptions(ctx) }},
 		{"subscription status", 400, refused, func(c *Client) error { _, err := c.Subscriptions(ctx); return err }},
 		{"files", 400, refused, func(c *Client) error { _, err := c.Files().Info(ctx, "/site/logo.png"); return err }},
 		{"deploy", 200, perOp, func(c *Client) error { _, err := c.Deploy(ctx, "{}"); return err }},

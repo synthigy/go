@@ -124,6 +124,12 @@ func (s *SqlTemplateWatch) drain() {
 			}
 		default:
 			s.buf.push(ev) // sentinels pass through
+			if ev.Type == "connection/resumed" {
+				select {
+				case s.trigger <- ev:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -348,6 +354,12 @@ func (q *QueryWatch) drain() {
 			}
 		} else {
 			q.buf.push(ev)
+			if ev.Type == "connection/resumed" {
+				select {
+				case q.trigger <- ev:
+				default:
+				}
+			}
 		}
 	}
 }

@@ -3,6 +3,79 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.5.0
+
+### Breaking
+- **`Observe` is gone (method and package-level); use `Watch`.** It posted its own subscription set, and the
+  engine keeps one set per client, so it overwrote the set every watch shared. For the same loop:
+  `w, _ := client.Watch(ctx, synthigy.WatchInterest{Records: xids}); for ev := range w.Events() {...}`. Its
+  `Backfill` / `BackfillLimit` options live on as `Watch` options. `Descriptor`, `RecordsDesc` and `SubKey`,
+  which only served it and the raw subscription calls, are gone too.
+- **`Subscribe`, `Unsubscribe`, `SubscribeModel`, `UnsubscribeModel`, `SetSubscriptions` and
+  `ClearSubscriptions` are unexported** (methods and package-level). Each replaced the client's whole
+  subscription set behind the watch multiplexer's back. Declare interest with `Watch`; `Subscriptions` still
+  shows what the engine holds.
+
+### Added
+- **Each event stream has its own subscription set** (engine 0.5.5+). Every connection gets a fresh stream id
+  (`/data/events?stream=…`, also on the `sse/open` event as `Event.Stream`) and each subscription POST names
+  it, so two processes on one client id no longer overwrite each other's watches. `Subscriptions` asks for the
+  watch stream's set. An older engine ignores the id and keeps one set per client.
+- **`Watch(ctx, interest, synthigy.Backfill(true))`** replays the record events missed during a reconnect from
+  `/history` (asked per watched record, at most `BackfillLimit` rows each, default 1000, marked
+  `WatchEvent.FromBackfill`), then emits `connection/resumed`. Live events that arrive during the replay are
+  held and delivered after it, also when the replay fails.
+- **A busy engine is retried for you.** `SERVER_BUSY` (HTTP 503 from an overloaded engine) is resent up to
+  3 attempts in all, waiting `Retry-After` (at most 10 s) with ±50% jitter, never past the client's `Timeout`; cancelling the context stops the wait. The request never
+  ran, so this is safe for writes too. When all 3 are refused you get the error: category `rate_limit`, retryable.
+
+### Fixed
+- **A subscription POST that outlives its stream's session no longer marks watches `Subscribed()`.** A POST
+  in flight when `sse/close` ended the stream could still succeed, and the covered watches were marked
+  subscribed although the engine had dropped that stream's set; they now wait for the next open's POST.
+- **A watch closed while another opens no longer sends the new watch a false `subscription/rejected`.** A
+  subscription POST cut off by the stream closing was reported as a refusal to every current watch.
+- **A watch no longer reports `Subscribed()` while no event stream is open.** With the stream gone (closed,
+  or the engine answered `STREAM_NOT_FOUND`) a watch whose interest matched the last posted set was marked
+  subscribed although the engine held nothing; it now waits for the next stream to open and post.
+- **A watch registered while the event stream reconnects no longer reports `Subscribed()` early.** Between a
+  dropped connection and the next `sse/open` the multiplexer kept the dead stream's id, so a watch whose
+  interest matched the last posted set was marked subscribed although the engine held nothing. `Listen` now
+  emits `{Type: "sse/close", Stream: id}` when an opened session ends, and the watch waits for the next open.
+- **Live queries re-run on `connection/resumed`.** `WatchQuery`, `WatchQueryXSQL` and `WatchSqlTemplate`
+  passed the sentinel through but did not refresh, so a dropped connection left them stale until the next
+  change.
+- **A subscription set is remembered as sent only once the engine took it.** The multiplexer recorded the union
+  before posting, so after a refused POST the same union was never sent again.
+- **The multiplexer never posts to a stale or missing stream.** It waits for the next `sse/open` when no stream
+  is open, a late `sse/open` from a closed stream no longer takes over, a flush queued for a closed stream
+  goes to the current one, and a `STREAM_NOT_FOUND` answer is not a refusal: it clears the stream id only if
+  that is still the current one, so it can't wipe a newer stream's id.
+- **A busy resend gets only what is left of the client's `Timeout`.** Each resend used to get a fresh full
+  timeout, so a call could run to about twice `Timeout`; now the whole call stays within it.
+- **A stale event stream's refusal no longer stops a newer one.** If the last watch closed and a new one opened
+  before the old stream finished failing, the old stream cancelled the new stream and marked it stopped. It also
+  no longer sends its refusal to, or marks as subscribed, the watches of the newer stream.
+- **A watch on every operation is no longer narrowed by another watch's op filter.** The shared subscription
+  sent the union of every watch's ops, so one watch filtered to `insert` stopped updates and deletes for watches
+  that wanted all of them. Any watch with records and no op filter now turns the filter off.
+- **A watch after a refused event stream opens a new stream.** A refusal used to leave the watch multiplexer
+  marked running, so later watches got no events. Also fixed a data race between closing the client and closing
+  the stream; cancelling during a busy wait now returns `ctx.Err()`.
+- **45 engine error codes now carry their real category** instead of `internal`: bad shapes, `INVALID_*` and
+  missing arguments are `validation`; `REF_NOT_FOUND`, `UNKNOWN_ATTRIBUTE`, `UNKNOWN_ROLE` and `DOC_NOT_FOUND` are
+  `not_found`; `GUARD_VIOLATION`, `CONSTRAINT_VIOLATION`, `DEPENDENT_OBJECTS`, `HOOK_REFUSED`, `LOCKED` and
+  `SCHEMA_CONFLICT` are `conflict`; `DB_UNAVAILABLE` is `internal` and retryable. `DB_ERROR` stays unclassified
+  and not retryable; the engine's own `retryable` flag still wins.
+- A 403 on the event stream ends `Listen` whatever its code, as in Python and
+  C# (it kept reconnecting on, say, `ENTITY_FORBIDDEN`), and every `Watch` gets
+  `subscription/rejected` with the error when the stream is refused (the
+  watches went quiet).
+- Watches keep receiving events after the event stream reconnects. The engine
+  drops an identity's subscriptions when its stream closes, and the multiplexer
+  did not send the unchanged set again, so every `Watch`, `WatchQuery` and
+  `WatchSqlTemplate` went quiet after the first reconnect.
+
 ## 0.4.0
 
 ### Added

@@ -400,11 +400,13 @@ movie (release_year >= ?from:int, order by title asc, limit 20)
 ## Live streaming (channels)
 
 ```go
-// Notify-then-refetch: observe specific records.
-stream, _ := synthigy.Observe(ctx, synthigy.RecordsDesc(userXID))
-defer stream.Close()
-for ev := range stream.Events() {
-    // ev.Type e.g. "record/update"; refetch with QueryAs
+// Watch specific records. Backfill replays what a reconnect missed.
+w, _ := synthigy.Watch(ctx, synthigy.WatchInterest{Records: []string{userXID}},
+    synthigy.Backfill(true))
+defer w.Close()
+for ev := range w.Events() {
+    // ev.Type e.g. "record/update" (ev.FromBackfill when replayed), or a
+    // sentinel: "connection/resumed", "subscription/rejected"
 }
 
 // Live analytics tile.
@@ -426,9 +428,13 @@ for ev := range qw.Events() {        // query/added | query/changed | query/remo
 }
 ```
 
-`Listen`, `Watch`, and `WatchSchema` give lower-level access to the shared SSE
-multiplexer. Every stream is a `*Stream[T]`: range `Events()`, call `Close()`
-to stop, and check `Err()` after the channel closes.
+Every watch shares one event stream and one subscription set per client;
+each connection gets a fresh stream id (engine 0.5.4+), so processes sharing a
+client id don't overwrite each other's watches. `Subscriptions` shows what the
+engine holds. `Listen` is the raw event stream (a `*Stream[Event]`: range
+`Events()`, call `Close()` to stop, check `Err()` after the channel closes); it
+carries only what watches subscribed to, plus an `sse/open` event when each
+connection opens and an `sse/close` event (same `Stream` id) when it ends.
 
 ## Testing
 

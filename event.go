@@ -22,6 +22,9 @@ type Event struct {
 	Tenant    any            `json:"tenant"`
 	Ts        string         `json:"ts"`
 
+	// Stream is the event stream's id, set on the sse/open and sse/close events.
+	Stream string `json:"-"`
+
 	// Raw is the full decoded envelope.
 	Raw map[string]any `json:"-"`
 
@@ -41,22 +44,4 @@ func parseEvent(payload []byte) (Event, error) {
 		ev.Raw = raw
 	}
 	return ev, nil
-}
-
-// matchesDescriptor reports whether a channel event matches the descriptor.
-// Record events match by record-xid; relation events match on Data[0] (the
-// server rotates so position 0 is the subscribed-perspective endpoint).
-func (ev Event) matchesDescriptor(d descriptor) bool {
-	if len(d.records) == 0 {
-		return false
-	}
-	if ev.RecordXID != "" {
-		_, ok := d.records[ev.RecordXID]
-		return ok
-	}
-	if len(ev.Data) >= 2 {
-		_, ok := d.records[ev.Data[0]]
-		return ok
-	}
-	return false
 }

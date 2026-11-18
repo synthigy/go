@@ -5,7 +5,7 @@
 // same surface: OAuth client-credentials auth, the full CRUD operation set
 // (search/get/sync/stack/slice/delete/purge/count), XSQL queries,
 // SQL templates, schema introspection, the temporal /history API, record
-// subscriptions, and SSE-based live streaming (Listen/Observe and the
+// subscriptions, and SSE-based live streaming (Listen and the
 // Watch family).
 //
 // Single-client model: one process, one client, one backend. Connect installs
@@ -56,7 +56,7 @@ package synthigy
 // every caller configures.
 const PlatformAudience = "https://synthigy.com"
 
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 // Record is a single entity record as returned by the /data endpoint —
 // a dynamic attribute map keyed by attribute name (in the requested key
