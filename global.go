@@ -167,6 +167,30 @@ func Purge(ctx context.Context, entity string, args Args, sel Selection, opts ..
 	return c.Purge(ctx, entity, args, sel, opts...)
 }
 
+func Claim(ctx context.Context, entity string, args Args, sel Selection, opts ...Opt) ([]Record, error) {
+	c, err := dflt()
+	if err != nil {
+		return nil, err
+	}
+	return c.Claim(ctx, entity, args, sel, opts...)
+}
+
+func Renew(ctx context.Context, entity string, xids []string, sel Selection, opts ...Opt) ([]Record, error) {
+	c, err := dflt()
+	if err != nil {
+		return nil, err
+	}
+	return c.Renew(ctx, entity, xids, sel, opts...)
+}
+
+func Release(ctx context.Context, entity string, data any, opts ...Opt) (int, error) {
+	c, err := dflt()
+	if err != nil {
+		return 0, err
+	}
+	return c.Release(ctx, entity, data, opts...)
+}
+
 func SQLTemplate(ctx context.Context, template string, params []any, opts ...Opt) ([]Record, error) {
 	c, err := dflt()
 	if err != nil {

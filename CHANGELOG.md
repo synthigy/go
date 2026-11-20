@@ -3,6 +3,12 @@
 All notable changes to `github.com/synthigy/go`. Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.5.1
+
+### Added
+- **Record locks (engine 0.5.6+):** `Claim`, `Renew` and `Release`, with `OpClaim` / `OpRelease`. `@claim` documents generate typed functions; `@release` documents are skipped with a pointer to the client method.
+- **Codegen:** `@slice` documents generate a method returning a relation-name-to-boolean map (empty when the engine sends null), also as a `@batch` member; `@purge` generates a list method. New `QuerySlice` and `ResultSlice`; `Slice` returns an empty map instead of nil on a null result.
+
 ## 0.5.0
 
 ### Breaking

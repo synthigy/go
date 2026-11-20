@@ -331,19 +331,60 @@ func TestGenerateSkipsMutationOps(t *testing.T) {
 		{Name: "save", Op: "sync", Entity: "movie", Source: "@sync save\nmovie"},
 		{Name: "add", Op: "stack", Entity: "movie", Source: "@stack add\nmovie"},
 		{Name: "drop", Op: "delete", Entity: "movie", Source: "@delete drop\nmovie"},
+		{Name: "free", Op: "release", Entity: "movie", Source: "@release free\n?ids:movie[]"},
+		{Name: "grab", Op: "claim", Entity: "movie", Source: "@claim grab\nmovie (limit 1)\n  title",
+			Result: result{Kind: "list", Fields: []field{{Key: "title", Type: "string"}}}},
 	}}
 	src := generate("gen", I, S)
 	if _, err := parser.ParseFile(token.NewFileSet(), "g.go", src, parser.AllErrors); err != nil {
 		t.Fatalf("does not parse: %v\n---\n%s", err, src)
 	}
-	for _, w := range []string{"func (MovieNS) List(", "func (MovieNS) Sync(", "func (MovieNS) Stack("} {
+	for _, w := range []string{"func (MovieNS) List(", "func (MovieNS) Grab(", "func (MovieNS) Sync(", "func (MovieNS) Stack("} {
 		if !strings.Contains(src, w) {
 			t.Errorf("missing %q", w)
 		}
 	}
-	for _, bad := range []string{"MovieSave", "MovieAdd", "MovieDrop"} {
+	for _, bad := range []string{"MovieSave", "MovieAdd", "MovieDrop", "MovieFree", ") Free("} {
 		if strings.Contains(src, bad) {
 			t.Errorf("mutation op emitted: %q", bad)
 		}
+	}
+}
+
+// @slice answers which relations were cut, not rows; @purge returns rows like @search.
+func TestGenerateSliceAndPurge(t *testing.T) {
+	S := &schema{Entities: map[string]entity{
+		"movie": {Name: "Movie", Attributes: map[string]attr{"title": {Type: "string"}},
+			Relations: map[string]relation{"actors": {To: "actor", Cardinality: "many"}}},
+	}}
+	I := &ir{Operations: []op{
+		{Name: "cut", Op: "slice", Entity: "movie", Source: "movie (xid = ?xid:string)\n  actors",
+			Params: []param{{Name: "xid", Type: "string"}},
+			Result: result{Kind: "list", Fields: []field{{Key: "actors", Kind: "relation", Cardinality: "many"}}}},
+		{Name: "wipe", Op: "purge", Entity: "movie", Source: "movie (limit 1)\n  title",
+			Result: result{Kind: "list", Fields: []field{{Key: "title", Type: "string"}}}},
+		{Name: "both", Batch: true, Members: []string{"cut", "wipe"}},
+	}}
+	src := generate("gen", I, S)
+	if _, err := parser.ParseFile(token.NewFileSet(), "g.go", src, parser.AllErrors); err != nil {
+		t.Fatalf("does not parse: %v\n---\n%s", err, src)
+	}
+	flat := strings.Join(strings.Fields(src), " ")
+	for _, w := range []string{
+		"func (MovieNS) Cut(ctx context.Context, params MovieCutParams, opts ...synthigy.Opt) (map[string]bool, error)",
+		"synthigy.QuerySlice(ctx,",
+		`synthigy.WireOp("slice")`,
+		"func (MovieNS) Wipe(ctx context.Context, opts ...synthigy.Opt) ([]MovieWipe, error)",
+		`synthigy.WireOp("purge")`,
+		"Cut map[string]bool CutErr error",
+		"synthigy.ResultSlice(rs[0])",
+		"Wipe []MovieWipe WipeErr error",
+	} {
+		if !strings.Contains(flat, w) {
+			t.Errorf("missing %q\n---\n%s", w, src)
+		}
+	}
+	if strings.Contains(src, "type MovieCut ") {
+		t.Errorf("slice must not emit a row projection type")
 	}
 }

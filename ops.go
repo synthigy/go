@@ -56,6 +56,12 @@ func OpDelete(entity string, data map[string]any) Op {
 func OpPurge(entity string, args Args, sel Selection) Op {
 	return Op{"op": "purge", "entity": entity, "args": args, "selections": normalizeSelection(sel)}
 }
+func OpClaim(entity string, args Args, sel Selection) Op {
+	return Op{"op": "claim", "entity": entity, "args": args, "selections": normalizeSelection(sel)}
+}
+func OpRelease(entity string, data any) Op {
+	return Op{"op": "release", "entity": entity, "data": data}
+}
 func OpSearchTree(entity, on string, args Args, sel Selection) Op {
 	return Op{"op": "search-tree", "entity": entity, "on": on, "args": args, "selections": normalizeSelection(sel)}
 }

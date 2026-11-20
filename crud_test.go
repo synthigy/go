@@ -3,6 +3,7 @@ package synthigy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,17 +28,11 @@ func connectStub(t *testing.T, results []map[string]any) (*httptest.Server, func
 	}
 }
 
-// captureOp runs fn against a stub that records the first operation of the
-// last /data request, and returns it.
+// captureBody runs fn against a stub that records the last /data request body.
+// captureOp returns the first operation of the request captureBody records.
 func captureOp(t *testing.T, resp []map[string]any, fn func(c *Client)) map[string]any {
 	t.Helper()
-	var gotBody map[string]any
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &gotBody)
-		writeResults(w, resp)
-	}))
-	fn(c)
+	gotBody := captureBody(t, resp, fn)
 	ops, _ := gotBody["operations"].([]any)
 	if len(ops) == 0 {
 		t.Fatalf("no operations captured: %v", gotBody)
@@ -153,6 +148,20 @@ func TestPurgeReturnsRawData(t *testing.T) {
 	var rows []map[string]any
 	if err := json.Unmarshal(raw, &rows); err != nil || len(rows) != 1 {
 		t.Fatalf("purge raw decode: %v (%v)", rows, err)
+	}
+}
+
+func TestDecodeCutsNullIsEmptyAndBadIsAnError(t *testing.T) {
+	for _, in := range []string{"", "null"} {
+		if m, err := decodeCuts(json.RawMessage(in)); err != nil || m == nil || len(m) != 0 {
+			t.Errorf("decodeCuts(%q) = %v, %v; want empty map", in, m, err)
+		}
+	}
+	if m, err := decodeCuts(json.RawMessage(`{"actors":true,"genres":false}`)); err != nil || !m["actors"] || m["genres"] {
+		t.Errorf("decodeCuts map = %v, %v", m, err)
+	}
+	if _, err := decodeCuts(json.RawMessage(`[1]`)); err == nil {
+		t.Error("decodeCuts of a list must fail")
 	}
 }
 
@@ -341,5 +350,84 @@ func TestSyncManySendsOneOpWithAllRecords(t *testing.T) {
 	}
 	if res.Count != 2 || len(res.Records) != 2 || res.Records[1]["xid"] != "b" {
 		t.Fatalf("returning result = %+v", res)
+	}
+}
+
+func captureBody(t *testing.T, resp []map[string]any, fn func(c *Client)) map[string]any {
+	t.Helper()
+	var gotBody map[string]any
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		writeResults(w, resp)
+	}))
+	fn(c)
+	return gotBody
+}
+
+func TestClaimSendsArgsSelectionAndActingAs(t *testing.T) {
+	var rows []Record
+	body := captureBody(t, []map[string]any{{"ok": true, "data": []map[string]any{{"xid": "j-1"}}}}, func(c *Client) {
+		var err error
+		rows, err = c.Claim(context.Background(), "Job", Args{"status": Eq("open"), "_limit": 2}, Selection{"xid": nil},
+			ActingAs("u-1"), KeyFormat("camel"))
+		if err != nil {
+			t.Fatalf("Claim: %v", err)
+		}
+	})
+	if body["acting_as"] != "u-1" || body["key_format"] != "camel" {
+		t.Errorf("acting_as/key_format not forwarded: %v", body)
+	}
+	op := body["operations"].([]any)[0].(map[string]any)
+	if op["op"] != "claim" || op["entity"] != "Job" || op["args"].(map[string]any)["_limit"] != float64(2) {
+		t.Errorf("claim op = %v", op)
+	}
+	if len(rows) != 1 || rows[0]["xid"] != "j-1" {
+		t.Errorf("rows = %v", rows)
+	}
+}
+
+func TestRenewReclaimsXidsAndSkipsNone(t *testing.T) {
+	body := captureBody(t, []map[string]any{{"ok": true, "data": []map[string]any{{"xid": "j-1"}}}}, func(c *Client) {
+		if _, err := c.Renew(context.Background(), "Job", []string{"j-1", "j-2"}, nil, ActingAs("u-1")); err != nil {
+			t.Fatalf("Renew: %v", err)
+		}
+	})
+	op := body["operations"].([]any)[0].(map[string]any)
+	args := op["args"].(map[string]any)
+	in := args["xid"].(map[string]any)["_in"].([]any)
+	if body["acting_as"] != "u-1" || op["op"] != "claim" || args["_limit"] != float64(2) || len(in) != 2 {
+		t.Errorf("renew op = %v", body)
+	}
+	if _, ok := op["selections"].(map[string]any)["xid"]; !ok {
+		t.Errorf("renew selects xid by default: %v", op)
+	}
+	calls := 0
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	rows, err := c.Renew(context.Background(), "Job", nil, nil)
+	if err != nil || len(rows) != 0 || calls != 0 {
+		t.Errorf("empty renew: rows=%v err=%v calls=%d", rows, err, calls)
+	}
+}
+
+func TestReleaseCountsAndSurfacesRecordLocked(t *testing.T) {
+	var n int
+	body := captureBody(t, []map[string]any{{"ok": true, "data": 1}}, func(c *Client) {
+		var err error
+		if n, err = c.Release(context.Background(), "Job", []string{"j-1"}, ActingAs("u-1")); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+	})
+	op := body["operations"].([]any)[0].(map[string]any)
+	if n != 1 || body["acting_as"] != "u-1" || op["op"] != "release" || len(op["data"].([]any)) != 1 {
+		t.Errorf("release: n=%d body=%v", n, body)
+	}
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeResults(w, []map[string]any{{"ok": false, "error": map[string]any{"code": "RECORD_LOCKED", "message": "held"}}})
+	}))
+	_, err := c.Release(context.Background(), "Job", []string{"j-1"})
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "RECORD_LOCKED" {
+		t.Errorf("want RECORD_LOCKED, got %v", err)
 	}
 }

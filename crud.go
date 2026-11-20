@@ -110,11 +110,7 @@ func (c *Client) Slice(ctx context.Context, entity string, args Args, sel Select
 	if err != nil {
 		return nil, err
 	}
-	var out map[string]bool
-	if err := json.Unmarshal(r.Data, &out); err != nil {
-		return nil, newError("failed to decode slice result: "+err.Error(), "INTERNAL_ERROR")
-	}
-	return out, nil
+	return decodeCuts(r.Data)
 }
 
 // Delete soft-deletes an entity identified by data, returning true on
@@ -140,6 +136,42 @@ func (c *Client) Purge(ctx context.Context, entity string, args Args, sel Select
 		return nil, err
 	}
 	return r.Data, nil
+}
+
+// Claim locks up to args["_limit"] free records matching args to the caller
+// and returns them; records the caller already holds match too and get a new lease.
+func (c *Client) Claim(ctx context.Context, entity string, args Args, sel Selection, opts ...Opt) ([]Record, error) {
+	r, err := c.execOne(ctx, OpClaim(entity, args, sel), opts...)
+	if err != nil {
+		return nil, err
+	}
+	return asRecords(r.Data)
+}
+
+// Renew extends the lease on records the caller holds; a record missing from
+// the result is no longer held. sel defaults to xid.
+func (c *Client) Renew(ctx context.Context, entity string, xids []string, sel Selection, opts ...Opt) ([]Record, error) {
+	if len(xids) == 0 {
+		return []Record{}, nil
+	}
+	if sel == nil {
+		sel = Selection{"xid": nil}
+	}
+	return c.Claim(ctx, entity, Args{"xid": In(xids), "_limit": len(xids)}, sel, opts...)
+}
+
+// Release clears the caller's locks on records named by a list of xids or a
+// unique-key map, returning how many were released.
+func (c *Client) Release(ctx context.Context, entity string, data any, opts ...Opt) (int, error) {
+	r, err := c.execOne(ctx, OpRelease(entity, data), opts...)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	if err := json.Unmarshal(r.Data, &n); err != nil {
+		return 0, newError("failed to decode release result: "+err.Error(), "INTERNAL_ERROR")
+	}
+	return n, nil
 }
 
 // SQLTemplate executes an ERD-aware SQL template ({entity.field} /
@@ -296,6 +328,35 @@ func ResultOneAs[T any](r OpResult) (*T, error) {
 		return nil, errorFromServer(r.Error, 0, r.RequestID)
 	}
 	return decodePtr[T](r.Data)
+}
+
+// QuerySlice runs an XSQL @slice document on the default client and returns
+// which relations were cut.
+func QuerySlice(ctx context.Context, xsql string, params map[string]any, opts ...Opt) (map[string]bool, error) {
+	data, err := Query(ctx, xsql, params, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return decodeCuts(data)
+}
+
+// ResultSlice decodes one Exec @slice result; a failed op is its *Error.
+func ResultSlice(r OpResult) (map[string]bool, error) {
+	if !r.OK {
+		return nil, errorFromServer(r.Error, 0, r.RequestID)
+	}
+	return decodeCuts(r.Data)
+}
+
+func decodeCuts(data json.RawMessage) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(data) == 0 || string(data) == "null" {
+		return out, nil
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, newError("failed to decode slice result: "+err.Error(), "INTERNAL_ERROR")
+	}
+	return out, nil
 }
 
 func decodeSlice[T any](data json.RawMessage) ([]T, error) {

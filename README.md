@@ -246,6 +246,7 @@ rule that refused, `.Doc` its manual section (read at `GET /docs/<Doc>`) and
 | `QueryAs[T]` / `QueryRecords` / `QueryRecord` | XSQL reads with `?name:type` params, incl. `count(…)` / `avg(…)` operations |
 | `SQLTemplate` | ERD-aware SQL with `{entity.field}` placeholders (totals, joins, windows) |
 | `Sync` / `Stack` / `Slice` / `Delete` / `Purge` | writes (see below) |
+| `Claim` / `Renew` / `Release` | record locks: claim free rows, extend the lease by xid (a row missing from the answer is no longer held), free them; a lock guards only the row's own columns |
 | `Schema` / `Lint` / `DeployedModel` / `RuntimeModel` | introspection |
 | `Whoami` | who a call runs as (`ActingAs` to ask about a user): roles, superuser, whether this client may act as users |
 | `History()` | temporal `get-at` / `events` / `diff` / `timeline` / `since` |

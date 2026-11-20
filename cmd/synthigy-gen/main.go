@@ -506,6 +506,10 @@ func generate(pkg string, I *ir, S *schema) string {
 			batches = append(batches, o)
 			continue
 		}
+		if o.Op == "release" {
+			fmt.Fprintf(os.Stderr, "skipped @release %s — use client.Release(ctx, %q, xids)\n", o.Name, o.Entity)
+			continue
+		}
 		if mutateVerbs[o.Op] {
 			fmt.Fprintf(os.Stderr, "skipped @%s %s — mutations are generated from the schema; use gen.API.%s.%s(ctx, data)\n",
 				o.Op, o.Name, entityPascal(S, o.Entity), pascal(o.Op))
@@ -726,9 +730,13 @@ func (g *generator) emitBatch(b op, ops []genOp, nsMap map[string]*nsData) strin
 		F := field(m)
 		t := "[]" + m.typeName
 		decode := fmt.Sprintf("synthigy.ResultAs[%s](rs[%d])", m.typeName, i)
-		if m.o.Op == "get" {
+		switch m.o.Op {
+		case "get":
 			t = "*" + m.typeName
 			decode = fmt.Sprintf("synthigy.ResultOneAs[%s](rs[%d])", m.typeName, i)
+		case "slice":
+			t = "map[string]bool"
+			decode = fmt.Sprintf("synthigy.ResultSlice(rs[%d])", i)
 		}
 		fields = append(fields, fmt.Sprintf("\t%s %s\n\t%sErr error", F, t, F))
 		if m.o.Op == "sql-template" {
@@ -764,12 +772,12 @@ func (g *generator) emitOp(ns *nsData, o op) {
 	// existed) would otherwise misroute sql-template ops to the search path and
 	// fail at runtime with MISSING_ENTITY.
 	switch o.Op {
-	case "search", "get", "sql-template":
+	case "search", "get", "claim", "slice", "purge", "sql-template":
 	case "":
 		fmt.Fprintf(os.Stderr, "op %q: IR is missing the \"op\" kind (stale contract?) — re-pull with `synthigy-gen -pull`\n", o.Name)
 		os.Exit(1)
 	default:
-		fmt.Fprintf(os.Stderr, "op %q: unknown op kind %q (expected search|get|sql-template)\n", o.Name, o.Op)
+		fmt.Fprintf(os.Stderr, "op %q: unknown op kind %q (expected search|get|claim|slice|purge|sql-template)\n", o.Name, o.Op)
 		os.Exit(1)
 	}
 
@@ -779,9 +787,10 @@ func (g *generator) emitOp(ns *nsData, o op) {
 	isSQL := o.Op == "sql-template"
 
 	// result type
-	if isSQL {
+	switch {
+	case isSQL:
 		g.addStruct(g.plainResultStruct(typeName, o.Result))
-	} else {
+	case o.Op != "slice":
 		g.projectionStruct(typeName, o.Entity, o.Result.Fields)
 	}
 
@@ -818,12 +827,20 @@ func (g *generator) emitOp(ns *nsData, o op) {
 		wire := "append(opts, synthigy.WireOp(\"get\"))..."
 		sig = g.methodSig(method, paramsType, hasParams, fmt.Sprintf("(*%s, error)", typeName))
 		body = fmt.Sprintf("return synthigy.QueryOneAs[%s](ctx,%s, %s, %s)", typeName, src, paramsExpr, wire)
-	default: // search
+	case o.Op == "slice":
 		paramsExpr := "nil"
 		if hasParams {
 			paramsExpr = "params.toParams()"
 		}
-		wire := "append(opts, synthigy.WireOp(\"search\"))..."
+		wire := "append(opts, synthigy.WireOp(\"slice\"))..."
+		sig = g.methodSig(method, paramsType, hasParams, "(map[string]bool, error)")
+		body = fmt.Sprintf("return synthigy.QuerySlice(ctx,%s, %s, %s)", src, paramsExpr, wire)
+	default: // search, claim, purge
+		paramsExpr := "nil"
+		if hasParams {
+			paramsExpr = "params.toParams()"
+		}
+		wire := fmt.Sprintf("append(opts, synthigy.WireOp(%q))...", o.Op)
 		sig = g.methodSig(method, paramsType, hasParams, fmt.Sprintf("([]%s, error)", typeName))
 		body = fmt.Sprintf("return synthigy.QueryAs[%s](ctx,%s, %s, %s)", typeName, src, paramsExpr, wire)
 	}
